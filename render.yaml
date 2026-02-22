@@ -1,4 +1,3 @@
-
 services:
   - type: web
     name: telegram-prediction-bot
@@ -9,18 +8,20 @@ services:
     startCommand: python main.py
     envVars:
       - key: PORT
-        value: 10000
+        value: "10000"
       - key: API_ID
-        sync: false
+        value: "29177661"
       - key: API_HASH
-        sync: false
+        value: "a8639172fa8d35dbfd8ea46286d349ab"
       - key: BOT_TOKEN
-        sync: false
+        value: "8458163781:AAFj5fth5J-nRjHHd0-hlxkX3r0_ClNtlwQ"
       - key: ADMIN_ID
-        sync: false
+        value: "6180384006"
       - key: SOURCE_CHANNEL_ID
-        value: -1002682552255
+        value: "-1002682552255"
       - key: PREDICTION_CHANNEL_ID
-        value: -1002338377421
+        value: "-1003664468884"
+      - key: PREDICTION_OFFSET
+        value: "2"
       - key: TELEGRAM_SESSION
         sync: false
