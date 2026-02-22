@@ -42,6 +42,7 @@ pending_predictions = {}
 queued_predictions = {}
 recent_games = {}
 processed_messages = set()
+processed_finalized = set()
 last_transferred_game = None
 current_game_number = 0
 prediction_offset = PREDICTION_OFFSET
@@ -75,17 +76,11 @@ def get_suits_in_group(group_str: str):
     return [s for s in ALL_SUITS if s in normalized]
 
 def extract_first_card_suit(group_str: str):
-    """
-    Extrait la couleur de la première carte du groupe.
-    Ex: "Q♦️5♥️A♥️" -> "♦️"
-    """
+    """Extrait la couleur de la première carte du groupe"""
     normalized = normalize_suits(group_str)
-    
-    # Chercher le premier symbole de couleur dans la chaîne
     for char in normalized:
         if char in ALL_SUITS:
             return SUIT_DISPLAY.get(char, char)
-    
     return None
 
 def get_suit_full_name(suit_symbol: str) -> str:
@@ -102,30 +97,37 @@ def is_message_finalized(message: str) -> bool:
         return False
     return '✅' in message or '🔰' in message
 
-def format_prediction_message(game_number: int, suit: str, status: str = "🤔🤔🤔") -> str:
+def format_prediction_message(game_number: int, suit: str, status: str = "⏳ EN COURS", result_group: str = None) -> str:
     """
-    Formate le message de prédiction selon le nouveau format:
-    🎰 PRÉDICTION #720
-    💫 Couleur: ♦️ carreaux
-    📊 Statut: 🤔🤔🤔
+    Formate le message de prédiction avec les nouveaux emojis:
+    📡 PRÉDICTION #720
+    🎯 Couleur: ♦️ carreaux
+    📋 Résultat: (Q♦️2♦️5♦️)
+    🌪️ Statut: ✅0️⃣ GAGNÉ
     """
     suit_name = get_suit_full_name(suit)
     
-    if status == "🤔🤔🤔":
+    if status == "⏳ EN COURS":
         # Message de prédiction initial
-        return f"""🎰 PRÉDICTION #{game_number}
-💫 Couleur: {suit} {suit_name}
-📊 Statut: {status}"""
-    else:
-        # Message de résultat (avec 🎯 au lieu de 💫)
-        return f"""🎰 PRÉDICTION #{game_number}
+        return f"""📡 PRÉDICTION #{game_number}
 🎯 Couleur: {suit} {suit_name}
-📊 Statut: {status}"""
+🌪️ Statut: {status}"""
+    else:
+        # Message de résultat avec les cartes trouvées
+        if result_group:
+            return f"""📡 PRÉDICTION #{game_number}
+🎯 Couleur: {suit} {suit_name}
+📋 Résultat: ({result_group})
+🌪️ Statut: {status}"""
+        else:
+            return f"""📡 PRÉDICTION #{game_number}
+🎯 Couleur: {suit} {suit_name}
+🌪️ Statut: {status}"""
 
 async def send_prediction_to_channel(target_game: int, suit: str, base_game: int):
     """Envoie une prédiction au canal de prédiction"""
     try:
-        prediction_msg = format_prediction_message(target_game, suit, "🤔🤔🤔")
+        prediction_msg = format_prediction_message(target_game, suit, "⏳ EN COURS")
         
         msg_id = 0
 
@@ -143,7 +145,7 @@ async def send_prediction_to_channel(target_game: int, suit: str, base_game: int
             'message_id': msg_id,
             'suit': suit,
             'base_game': base_game,
-            'status': '🤔🤔🤔',
+            'status': '⏳ EN COURS',
             'check_count': 0,
             'created_at': datetime.now().isoformat()
         }
@@ -155,10 +157,9 @@ async def send_prediction_to_channel(target_game: int, suit: str, base_game: int
         logger.error(f"Erreur envoi prédiction: {e}")
         return None
 
-async def update_prediction_status(game_number: int, new_status: str, win_delay: int = 0):
+async def update_prediction_status(game_number: int, new_status: str, result_group: str = None):
     """
-    Met à jour le statut d'une prédiction.
-    win_delay: 0 = gagné immédiatement, 1 = gagné au jeu+1, 2 = gagné au jeu+2
+    Met à jour le statut d'une prédiction dans le canal avec le résultat réel
     """
     try:
         if game_number not in pending_predictions:
@@ -176,19 +177,21 @@ async def update_prediction_status(game_number: int, new_status: str, win_delay:
         else:
             status_text = new_status
         
-        updated_msg = format_prediction_message(game_number, suit, status_text)
+        # Créer le message avec le résultat réel
+        updated_msg = format_prediction_message(game_number, suit, status_text, result_group)
 
         if PREDICTION_CHANNEL_ID and PREDICTION_CHANNEL_ID != 0 and message_id > 0 and prediction_channel_ok:
             try:
                 await client.edit_message(PREDICTION_CHANNEL_ID, message_id, updated_msg)
-                logger.info(f"✅ Prédiction #{game_number} mise à jour: {status_text}")
+                logger.info(f"✅ Prédiction #{game_number} mise à jour: {status_text} | Résultat: ({result_group})")
             except Exception as e:
                 logger.error(f"❌ Erreur mise à jour dans le canal: {e}")
 
         pred['status'] = new_status
         logger.info(f"Prédiction #{game_number} statut mis à jour: {new_status}")
 
-        if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '❌']:
+        # Supprimer des prédictions actives si terminée
+        if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '✅3️⃣', '❌']:
             del pending_predictions[game_number]
             logger.info(f"Prédiction #{game_number} terminée et supprimée")
 
@@ -201,85 +204,94 @@ async def update_prediction_status(game_number: int, new_status: str, win_delay:
 async def check_prediction_result(game_number: int, first_group: str):
     """
     Vérifie si une prédiction est gagnée ou perdue.
-    Cherche la couleur prédite dans le premier groupe du jeu cible.
+    Affiche le résultat réel (premier groupe) dans la mise à jour.
     """
-    # Vérifier si on a une prédiction pour ce jeu
+    # Normaliser le groupe pour analyse
+    normalized_group = normalize_suits(first_group)
+    
+    # ========== VÉRIFICATION N (numéro prédit) ==========
     if game_number in pending_predictions:
         pred = pending_predictions[game_number]
         target_suit = pred['suit']
-        
-        # Vérifier si la couleur prédite est dans le premier groupe
-        suits_in_group = get_suits_in_group(first_group)
         normalized_target = normalize_suits(target_suit)
         
-        found = False
-        for suit in suits_in_group:
-            if suit in normalized_target:
-                found = True
-                break
+        # Compter combien de fois la couleur apparaît dans le premier groupe
+        suit_count = normalized_group.count(normalized_target)
         
-        if found:
-            await update_prediction_status(game_number, '✅0️⃣', 0)
-            logger.info(f"🎉 Prédiction #{game_number} GAGNÉE immédiatement! ({target_suit} trouvé)")
+        logger.info(f"🔍 Vérification #{game_number} (N): {target_suit} trouvé {suit_count} fois dans '{first_group}'")
+        
+        # Si 3 cartes de la couleur prédite trouvées
+        if suit_count >= 3:
+            await update_prediction_status(game_number, '✅0️⃣', first_group)
+            logger.info(f"🎉 Prédiction #{game_number} GAGNÉE immédiatement! ({suit_count}x {target_suit}) | Résultat: ({first_group})")
             return True
         else:
-            # Marquer qu'on a vérifié une fois
+            # Marquer qu'on a vérifié une fois (N), passer à N+1
             pred['check_count'] = 1
-            logger.info(f"🔍 Prédiction #{game_number}: {target_suit} non trouvé, attente jeu+1")
+            logger.info(f"⏳ Prédiction #{game_number}: {suit_count}x {target_suit} trouvé, attente vérification N+1...")
     
-    # Vérifier le jeu précédent (N-1) pour voir s'il a gagné au délai +1
+    # ========== VÉRIFICATION N+1 ==========
     prev_game = game_number - 1
     if prev_game in pending_predictions:
         pred = pending_predictions[prev_game]
         if pred.get('check_count', 0) == 1:
             target_suit = pred['suit']
-            
-            suits_in_group = get_suits_in_group(first_group)
             normalized_target = normalize_suits(target_suit)
             
-            found = False
-            for suit in suits_in_group:
-                if suit in normalized_target:
-                    found = True
-                    break
+            suit_count = normalized_group.count(normalized_target)
+            logger.info(f"🔍 Vérification #{prev_game}+1 (N+1): {target_suit} trouvé {suit_count} fois dans '{first_group}'")
             
-            if found:
-                await update_prediction_status(prev_game, '✅1️⃣', 1)
-                logger.info(f"🎉 Prédiction #{prev_game} GAGNÉE au jeu+1! ({target_suit} trouvé)")
+            if suit_count >= 3:
+                await update_prediction_status(prev_game, '✅1️⃣', first_group)
+                logger.info(f"🎉 Prédiction #{prev_game} GAGNÉE au N+1! ({suit_count}x {target_suit}) | Résultat: ({first_group})")
                 return True
             else:
                 pred['check_count'] = 2
-                logger.info(f"🔍 Prédiction #{prev_game}: {target_suit} non trouvé au jeu+1, attente jeu+2")
+                logger.info(f"⏳ Prédiction #{prev_game}: {suit_count}x {target_suit} en N+1, attente N+2...")
     
-    # Vérifier le jeu N-2 pour voir s'il a gagné au délai +2
+    # ========== VÉRIFICATION N+2 ==========
     prev_prev_game = game_number - 2
     if prev_prev_game in pending_predictions:
         pred = pending_predictions[prev_prev_game]
         if pred.get('check_count', 0) == 2:
             target_suit = pred['suit']
-            
-            suits_in_group = get_suits_in_group(first_group)
             normalized_target = normalize_suits(target_suit)
             
-            found = False
-            for suit in suits_in_group:
-                if suit in normalized_target:
-                    found = True
-                    break
+            suit_count = normalized_group.count(normalized_target)
+            logger.info(f"🔍 Vérification #{prev_prev_game}+2 (N+2): {target_suit} trouvé {suit_count} fois dans '{first_group}'")
             
-            if found:
-                await update_prediction_status(prev_prev_game, '✅2️⃣', 2)
-                logger.info(f"🎉 Prédiction #{prev_prev_game} GAGNÉE au jeu+2! ({target_suit} trouvé)")
+            if suit_count >= 3:
+                await update_prediction_status(prev_prev_game, '✅2️⃣', first_group)
+                logger.info(f"🎉 Prédiction #{prev_prev_game} GAGNÉE au N+2! ({suit_count}x {target_suit}) | Résultat: ({first_group})")
                 return True
             else:
-                # Échec après 3 tentatives
-                await update_prediction_status(prev_prev_game, '❌')
-                logger.info(f"💔 Prédiction #{prev_prev_game} PERDUE après 3 tentatives")
+                pred['check_count'] = 3
+                logger.info(f"⏳ Prédiction #{prev_prev_game}: {suit_count}x {target_suit} en N+2, attente N+3...")
+    
+    # ========== VÉRIFICATION N+3 ==========
+    prev_prev_prev_game = game_number - 3
+    if prev_prev_prev_game in pending_predictions:
+        pred = pending_predictions[prev_prev_prev_game]
+        if pred.get('check_count', 0) == 3:
+            target_suit = pred['suit']
+            normalized_target = normalize_suits(target_suit)
+            
+            suit_count = normalized_group.count(normalized_target)
+            logger.info(f"🔍 Vérification #{prev_prev_prev_game}+3 (N+3): {target_suit} trouvé {suit_count} fois dans '{first_group}'")
+            
+            if suit_count >= 3:
+                await update_prediction_status(prev_prev_prev_game, '✅3️⃣', first_group)
+                logger.info(f"🎉 Prédiction #{prev_prev_prev_game} GAGNÉE au N+3! ({suit_count}x {target_suit}) | Résultat: ({first_group})")
+                return True
+            else:
+                # Échec après 4 tentatives
+                await update_prediction_status(prev_prev_prev_game, '❌', first_group)
+                logger.info(f"💔 Prédiction #{prev_prev_prev_game} PERDUE après 4 vérifications | Résultat: ({first_group})")
                 
-                # Créer une prédiction backup avec la couleur opposée
-                backup_game = prev_prev_game + prediction_offset
+                # Créer une prédiction backup
+                backup_game = prev_prev_prev_game + prediction_offset
                 alternate_suit = get_alternate_suit(target_suit)
-                await create_prediction(backup_game, alternate_suit, prev_prev_game, is_backup=True)
+                await create_prediction(backup_game, alternate_suit, prev_prev_prev_game, is_backup=True)
                 return False
     
     return None
@@ -290,14 +302,11 @@ async def create_prediction(target_game: int, suit: str, base_game: int, is_back
         logger.info(f"Prédiction #{target_game} déjà existante, ignorée")
         return False
     
-    # Vérifier la distance par rapport au jeu actuel
     distance = target_game - current_game_number
     
     if distance <= PROXIMITY_THRESHOLD and distance > 0:
-        # Envoyer immédiatement si on est proche
         await send_prediction_to_channel(target_game, suit, base_game)
     elif distance > 0:
-        # Mettre en file d'attente
         queued_predictions[target_game] = {
             'target_game': target_game,
             'suit': suit,
@@ -306,15 +315,15 @@ async def create_prediction(target_game: int, suit: str, base_game: int, is_back
         }
         logger.info(f"📋 Prédiction #{target_game} ({suit}) mise en file d'attente (dans {distance} jeux)")
     else:
-        logger.warning(f"⚠️ Prédiction #{target_game} expirée (jeu actuel: {current_game_number}), ignorée")
+        logger.warning(f"⚠️ Prédiction #{target_game} expirée, ignorée")
     
     return True
 
 async def process_new_message(message_text: str, chat_id: int, is_finalized: bool = False):
     """
     Traite un nouveau message du canal source.
-    - Si non finalisé: crée les prédictions immédiatement
-    - Si finalisé: vérifie les résultats des prédictions existantes
+    - Crée les prédictions immédiatement
+    - Vérifie les résultats UNIQUEMENT si le message est finalisé
     """
     global current_game_number, last_transferred_game
     
@@ -325,7 +334,7 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
         
         current_game_number = game_number
         
-        # Éviter le traitement double
+        # Éviter le traitement double des messages non finalisés
         message_hash = f"{game_number}_{message_text[:50]}"
         if message_hash in processed_messages:
             return
@@ -342,37 +351,44 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
         
         logger.info(f"Jeu #{game_number} traité - Groupe1: {first_group} - Finalisé: {is_finalized}")
         
-        # Transfert du message si activé et finalisé
-        if is_finalized and transfer_enabled and ADMIN_ID and ADMIN_ID != 0 and last_transferred_game != game_number:
-            try:
-                transfer_msg = f"📨 **Message finalisé du canal source:**\n\n{message_text}"
-                await client.send_message(ADMIN_ID, transfer_msg)
-                last_transferred_game = game_number
-                logger.info(f"✅ Message #{game_number} transféré à l'admin")
-            except Exception as e:
-                logger.error(f"❌ Erreur transfert: {e}")
-        
-        # Si le message est finalisé, vérifier les résultats des prédictions
-        if is_finalized:
-            await check_prediction_result(game_number, first_group)
-        
-        # Traiter les prédictions en file d'attente (toujours, finalisé ou non)
-        await process_queued_predictions(game_number)
-        
-        # Créer une nouvelle prédiction basée sur ce jeu (même si non finalisé)
-        # Extraire la couleur de la première carte
+        # ========== CRÉATION DE PRÉDICTION (TOUJOURS) ==========
         first_card_suit = extract_first_card_suit(first_group)
         
         if first_card_suit:
             target_game = game_number + prediction_offset
             
-            # Vérifier si on peut créer la prédiction
             if len(pending_predictions) < MAX_PENDING_PREDICTIONS:
                 await create_prediction(target_game, first_card_suit, game_number)
             else:
                 logger.info(f"⏸️ Max prédictions atteint ({MAX_PENDING_PREDICTIONS}), attente...")
         else:
             logger.warning(f"⚠️ Jeu #{game_number}: impossible d'extraire la couleur de la première carte")
+        
+        # ========== VÉRIFICATION DES RÉSULTATS (UNIQUEMENT SI FINALISÉ) ==========
+        if is_finalized:
+            finalized_hash = f"finalized_{game_number}"
+            if finalized_hash not in processed_finalized:
+                processed_finalized.add(finalized_hash)
+                
+                # Transfert du message si activé
+                if transfer_enabled and ADMIN_ID and ADMIN_ID != 0 and last_transferred_game != game_number:
+                    try:
+                        transfer_msg = f"📨 **Message finalisé du canal source:**\n\n{message_text}"
+                        await client.send_message(ADMIN_ID, transfer_msg)
+                        last_transferred_game = game_number
+                        logger.info(f"✅ Message #{game_number} transféré à l'admin")
+                    except Exception as e:
+                        logger.error(f"❌ Erreur transfert: {e}")
+                
+                # Vérifier les résultats avec le premier groupe
+                logger.info(f"✅ Message #{game_number} finalisé - Lancement vérification résultats avec: ({first_group})")
+                await check_prediction_result(game_number, first_group)
+                
+                if len(processed_finalized) > 100:
+                    processed_finalized.clear()
+        
+        # Traiter les prédictions en file d'attente
+        await process_queued_predictions(game_number)
         
         # Stocker le jeu pour référence
         recent_games[game_number] = {
@@ -415,14 +431,14 @@ async def process_queued_predictions(current_game: int):
                 pred_data['base_game']
             )
         elif distance <= 0:
-            logger.warning(f"⚠️ Prédiction #{target_game} expirée (jeu actuel: {current_game}), supprimée")
+            logger.warning(f"⚠️ Prédiction #{target_game} expirée, supprimée")
             queued_predictions.pop(target_game, None)
 
 # ==================== EVENT HANDLERS ====================
 
 @client.on(events.NewMessage())
 async def handle_message(event):
-    """Gère les nouveaux messages du canal source"""
+    """Gère les nouveaux messages - CRÉE LES PRÉDICTIONS IMMÉDIATEMENT"""
     try:
         chat = await event.get_chat()
         chat_id = chat.id if hasattr(chat, 'id') else event.chat_id
@@ -432,12 +448,9 @@ async def handle_message(event):
         
         if chat_id == SOURCE_CHANNEL_ID:
             message_text = event.message.message
-            logger.info(f"Message reçu du canal source: {message_text[:80]}...")
+            logger.info(f"📨 Message reçu: {message_text[:80]}...")
             
-            # Déterminer si le message est finalisé
             is_finalized = is_message_finalized(message_text)
-            
-            # Traiter le message (créer prédiction si nouveau, vérifier si finalisé)
             await process_new_message(message_text, chat_id, is_finalized)
             
     except Exception as e:
@@ -447,7 +460,7 @@ async def handle_message(event):
 
 @client.on(events.MessageEdited())
 async def handle_edited_message(event):
-    """Gère les messages édités (finalisation)"""
+    """Gère les messages édités (finalisation) - VÉRIFIE LES RÉSULTATS"""
     try:
         chat = await event.get_chat()
         chat_id = chat.id if hasattr(chat, 'id') else event.chat_id
@@ -457,14 +470,15 @@ async def handle_edited_message(event):
         
         if chat_id == SOURCE_CHANNEL_ID:
             message_text = event.message.message
-            logger.info(f"Message édité dans canal source: {message_text[:80]}...")
+            logger.info(f"✏️ Message édité: {message_text[:80]}...")
             
-            # Un message édité est potentiellement finalisé
             is_finalized = is_message_finalized(message_text)
             
             if is_finalized:
-                logger.info(f"✅ Message finalisé détecté (édition)")
+                logger.info(f"✅ Message finalisé détecté - Lancement vérification")
                 await process_new_message(message_text, chat_id, is_finalized=True)
+            else:
+                logger.info(f"⏳ Message édité mais pas encore finalisé")
             
     except Exception as e:
         logger.error(f"Erreur handle_edited_message: {e}")
@@ -478,21 +492,22 @@ async def cmd_start(event):
     if event.is_group or event.is_channel:
         return
     
-    logger.info(f"Commande /start reçue de {event.sender_id}")
-    await event.respond("""🤖 **Bot de Prédiction Baccarat - v2.0**
+    await event.respond("""🤖 **Bot de Prédiction Baccarat - v2.3**
 
-Nouveau système de prédiction basé sur la première carte!
+✨ **Nouveau design:**
+📡 PRÉDICTION #720
+🎯 Couleur: ♦️ carreaux
+📋 Résultat: (Q♦️2♦️5♦️)
+🌪️ Statut: ✅0️⃣ GAGNÉ
 
 **Commandes:**
-• `/status` - Voir les prédictions en cours
-• `/setoffset <nombre>` - Changer le décalage de prédiction (défaut: 2)
+• `/status` - Voir les prédictions
+• `/setoffset <n>` - Changer le décalage
 • `/help` - Aide détaillée
-• `/debug` - Informations de débogage
-• `/checkchannels` - Vérifier l'accès aux canaux""")
+• `/debug` - Infos système""")
 
 @client.on(events.NewMessage(pattern='/setoffset'))
 async def cmd_setoffset(event):
-    """Permet à l'admin de changer le paramètre de décalage"""
     if event.is_group or event.is_channel:
         return
     
@@ -503,12 +518,11 @@ async def cmd_setoffset(event):
     global prediction_offset
     
     try:
-        # Extraire le nombre de la commande
         text = event.message.message
         parts = text.split()
         
         if len(parts) < 2:
-            await event.respond(f"⚠️ Usage: `/setoffset <nombre>`\n\nValeur actuelle: **{prediction_offset}**")
+            await event.respond(f"⚠️ Usage: `/setoffset <nombre>`\nValeur actuelle: **{prediction_offset}**")
             return
         
         new_offset = int(parts[1])
@@ -518,11 +532,10 @@ async def cmd_setoffset(event):
             return
         
         prediction_offset = new_offset
-        logger.info(f"Paramètre de prédiction changé par admin: offset = {prediction_offset}")
-        await event.respond(f"✅ Paramètre de prédiction mis à jour!\n\nNouveau décalage: **{prediction_offset}**\n\nLes prochaines prédictions seront: Jeu actuel + {prediction_offset}")
+        await event.respond(f"✅ Décalage mis à jour: **{prediction_offset}**")
         
     except ValueError:
-        await event.respond("⚠️ Veuillez entrer un nombre valide. Exemple: `/setoffset 3`")
+        await event.respond("⚠️ Entrez un nombre valide. Ex: `/setoffset 3`")
     except Exception as e:
         logger.error(f"Erreur setoffset: {e}")
         await event.respond(f"❌ Erreur: {str(e)}")
@@ -532,22 +545,21 @@ async def cmd_status(event):
     if event.is_group or event.is_channel:
         return
     
-    logger.info(f"Commande /status reçue de {event.sender_id}")
-    
     if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
         await event.respond("⛔ Commande réservée à l'administrateur")
         return
     
     status_msg = f"📊 **État des prédictions:**\n\n"
     status_msg += f"🎮 Jeu actuel: #{current_game_number}\n"
-    status_msg += f"📏 Décalage de prédiction: +{prediction_offset}\n\n"
+    status_msg += f"📏 Décalage: +{prediction_offset}\n\n"
     
     if pending_predictions:
         status_msg += f"**🔮 Prédictions actives ({len(pending_predictions)}/{MAX_PENDING_PREDICTIONS}):**\n"
         for game_num, pred in sorted(pending_predictions.items()):
             distance = game_num - current_game_number
             suit_name = get_suit_full_name(pred['suit'])
-            status_msg += f"• #{game_num}: {pred['suit']} ({suit_name}) - {pred['status']} (dans {distance} jeux)\n"
+            check_info = f"(vérifié {pred['check_count']}x)" if pred['check_count'] > 0 else "(attente)"
+            status_msg += f"• #{game_num}: {pred['suit']} {suit_name} - {pred['status']} {check_info}\n"
     else:
         status_msg += "**🔮 Aucune prédiction active**\n"
     
@@ -556,7 +568,7 @@ async def cmd_status(event):
         for game_num, pred in sorted(queued_predictions.items()):
             distance = game_num - current_game_number
             suit_name = get_suit_full_name(pred['suit'])
-            status_msg += f"• #{game_num}: {pred['suit']} ({suit_name}) - dans {distance} jeux\n"
+            status_msg += f"• #{game_num}: {pred['suit']} {suit_name} - dans {distance} jeux\n"
     
     await event.respond(status_msg)
 
@@ -565,126 +577,56 @@ async def cmd_debug(event):
     if event.is_group or event.is_channel:
         return
     
-    logger.info(f"Commande /debug reçue de {event.sender_id}")
-    
     debug_msg = f"""🔍 **Informations de débogage:**
 
 **Configuration:**
-• Source Channel: {SOURCE_CHANNEL_ID}
-• Prediction Channel: {PREDICTION_CHANNEL_ID}
-• Admin ID: {ADMIN_ID}
-• Décalage prédiction: {prediction_offset}
-
-**Accès aux canaux:**
-• Canal source: {'✅ OK' if source_channel_ok else '❌ Non accessible'}
-• Canal prédiction: {'✅ OK' if prediction_channel_ok else '❌ Non accessible'}
+• Source: {SOURCE_CHANNEL_ID}
+• Prédiction: {PREDICTION_CHANNEL_ID}
+• Décalage: {prediction_offset}
 
 **État:**
 • Jeu actuel: #{current_game_number}
-• Prédictions actives: {len(pending_predictions)}/{MAX_PENDING_PREDICTIONS}
-• En file d'attente: {len(queued_predictions)}
-• Jeux récents: {len(recent_games)}
-• Port: {PORT}
+• Actives: {len(pending_predictions)}/{MAX_PENDING_PREDICTIONS}
+• File d'attente: {len(queued_predictions)}
 
-**Règles actuelles:**
-• Prédiction: Jeu actuel + {prediction_offset}
-• Basée sur: Première carte du premier groupe
-• Max prédictions: {MAX_PENDING_PREDICTIONS}
-• Seuil proximité: {PROXIMITY_THRESHOLD} jeux
-• Vérification: Attend message finalisé ✅
+**🆕 v2.3 - Design:**
+📡 PRÉDICTION #N
+🎯 Couleur: [suit] [nom]
+📋 Résultat: ([cartes])
+🌪️ Statut: [statut]
+
+**Fonctionnement:**
+• ✅ Prédictions: **IMMÉDIATES**
+• ✅ Résultats: **AVEC CARTES RÉELLES**
+• ✅ Vérification: **UNIQUEMENT** sur finalisés
+• ✅ Condition: **3 cartes** de la couleur
+• ✅ Étapes: N, N+1, N+2, N+3
 """
     await event.respond(debug_msg)
-
-@client.on(events.NewMessage(pattern='/checkchannels'))
-async def cmd_checkchannels(event):
-    global source_channel_ok, prediction_channel_ok
-    
-    if event.is_group or event.is_channel:
-        return
-    
-    logger.info(f"Commande /checkchannels reçue de {event.sender_id}")
-    await event.respond("🔍 Vérification des accès aux canaux...")
-    
-    result_msg = "📡 **Résultat de la vérification:**\n\n"
-    
-    try:
-        source_entity = await client.get_entity(SOURCE_CHANNEL_ID)
-        source_title = getattr(source_entity, 'title', 'N/A')
-        source_channel_ok = True
-        result_msg += f"✅ **Canal source** ({SOURCE_CHANNEL_ID}):\n"
-        result_msg += f"   Nom: {source_title}\n"
-        result_msg += f"   Statut: Accessible\n\n"
-    except Exception as e:
-        source_channel_ok = False
-        result_msg += f"❌ **Canal source** ({SOURCE_CHANNEL_ID}):\n"
-        result_msg += f"   Erreur: {str(e)[:100]}\n\n"
-    
-    try:
-        pred_entity = await client.get_entity(PREDICTION_CHANNEL_ID)
-        pred_title = getattr(pred_entity, 'title', 'N/A')
-        
-        try:
-            test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🔍 Test...")
-            await asyncio.sleep(1)
-            await client.delete_messages(PREDICTION_CHANNEL_ID, test_msg.id)
-            prediction_channel_ok = True
-            result_msg += f"✅ **Canal prédiction** ({PREDICTION_CHANNEL_ID}):\n"
-            result_msg += f"   Nom: {pred_title}\n"
-            result_msg += f"   Statut: Accessible avec droits d'écriture\n\n"
-        except Exception as write_error:
-            prediction_channel_ok = False
-            result_msg += f"⚠️ **Canal prédiction** ({PREDICTION_CHANNEL_ID}):\n"
-            result_msg += f"   Nom: {pred_title}\n"
-            result_msg += f"   Erreur écriture: {str(write_error)[:50]}\n\n"
-    except Exception as e:
-        prediction_channel_ok = False
-        result_msg += f"❌ **Canal prédiction** ({PREDICTION_CHANNEL_ID}):\n"
-        result_msg += f"   Erreur: {str(e)[:80]}\n\n"
-    
-    if source_channel_ok and prediction_channel_ok:
-        result_msg += "🎉 **Tout est prêt!** Le bot peut fonctionner normalement."
-    else:
-        result_msg += "⚠️ **Actions requises** pour que le bot fonctionne correctement."
-    
-    await event.respond(result_msg)
 
 @client.on(events.NewMessage(pattern='/help'))
 async def cmd_help(event):
     if event.is_group or event.is_channel:
         return
     
-    logger.info(f"Commande /help reçue de {event.sender_id}")
-    
-    await event.respond(f"""📖 **Aide - Bot de Prédiction v2.0**
+    await event.respond(f"""📖 **Aide - Bot v2.3**
 
-**🎯 Nouveau système de prédiction:**
-Le bot prédit maintenant la **couleur de la première carte** du premier groupe!
+**🎯 Nouveau format:**
 
-**Fonctionnement:**
-1. Surveille le canal source (tous messages)
-2. Extrait la première carte du premier groupe (ex: Q♦️5♥️A♥️ → ♦️)
-3. Crée une prédiction pour le jeu **actuel + {prediction_offset}**
-4. Format: 🎰 PRÉDICTION #N+{prediction_offset} avec la couleur trouvée
+**PRÉDICTION INITIALE:**
 
-**Exemple:**
+**📊 Statuts possibles:**
+• ⏳ EN COURS = En attente de vérification
+• ✅0️⃣ GAGNÉ = Gagné au numéro prédit (N)
+• ✅1️⃣ GAGNÉ = Gagné au numéro+1 (N+1)
+• ✅2️⃣ GAGNÉ = Gagné au numéro+2 (N+2)
+• ✅3️⃣ GAGNÉ = Gagné au numéro+3 (N+3)
+• ❌ PERDU = Perdu (pas trouvé après N+3)
 
-**Vérification (sur messages finalisés ✅):**
-• ✅0️⃣ GAGNÉ = Couleur trouvée au numéro prédit
-• ✅1️⃣ GAGNÉ = Couleur trouvée au numéro+1
-• ✅2️⃣ GAGNÉ = Couleur trouvée au numéro+2
-• ❌ PERDU = Échec après 3 tentatives → Backup auto
-
-**Commandes admin:**
-• `/setoffset <n>` - Changer le décalage (défaut: 2)
+**Commandes:**
+• `/setoffset <n>` - Décalage actuel: {prediction_offset}
 • `/status` - Voir les prédictions
-• `/checkchannels` - Vérifier les canaux
-• `/debug` - Infos système
-• `/transfert` - Activer transfert messages
-• `/stoptransfert` - Désactiver le transfert
-
-**Paramètre actuel:**
-Décalage de prédiction: **+{prediction_offset}** jeux
-Modifiable avec `/setoffset 3` (par exemple)""")
+• `/debug` - Infos système""")
 
 # ==================== TRANSFERT COMMANDS ====================
 
@@ -696,17 +638,7 @@ async def cmd_transfert(event):
         return
     global transfer_enabled
     transfer_enabled = True
-    logger.info(f"Transfert activé par {event.sender_id}")
-    await event.respond("✅ Transfert des messages finalisés activé!")
-
-@client.on(events.NewMessage(pattern='/activetransfert'))
-async def cmd_active_transfert(event):
-    if event.is_group or event.is_channel:
-        return
-    global transfer_enabled
-    transfer_enabled = True
-    logger.info(f"Transfert réactivé par {event.sender_id}")
-    await event.respond("✅ Transfert réactivé avec succès!")
+    await event.respond("✅ Transfert activé!")
 
 @client.on(events.NewMessage(pattern='/stoptransfert'))
 async def cmd_stop_transfert(event):
@@ -714,8 +646,7 @@ async def cmd_stop_transfert(event):
         return
     global transfer_enabled
     transfer_enabled = False
-    logger.info(f"Transfert désactivé par {event.sender_id}")
-    await event.respond("⛔ Transfert des messages désactivé.")
+    await event.respond("⛔ Transfert désactivé.")
 
 # ==================== WEB SERVER ====================
 
@@ -724,7 +655,7 @@ async def index(request):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Bot Prédiction Baccarat v2.0</title>
+        <title>Bot Prédiction Baccarat v2.3</title>
         <meta charset="utf-8">
         <style>
             body {{ font-family: Arial, sans-serif; margin: 40px; background: #1a1a2e; color: #eee; }}
@@ -735,20 +666,19 @@ async def index(request):
         </style>
     </head>
     <body>
-        <h1>🎯 Bot de Prédiction Baccarat v2.0</h1>
-        <p>Prédiction basée sur la première carte du premier groupe</p>
+        <h1>📡 Bot de Prédiction Baccarat v2.3</h1>
+        <p>Nouveau design avec résultats réels</p>
         
         <div class="status">
-            <h3>📊 Statut actuel</h3>
+            <h3>📊 Statut</h3>
             <div class="metric"><strong>Jeu actuel:</strong> #{current_game_number}</div>
-            <div class="metric"><strong>Décalage:</strong> +{prediction_offset} jeux</div>
+            <div class="metric"><strong>Décalage:</strong> +{prediction_offset}</div>
             <div class="metric"><strong>Prédictions actives:</strong> {len(pending_predictions)}/{MAX_PENDING_PREDICTIONS}</div>
-            <div class="metric"><strong>En file d'attente:</strong> {len(queued_predictions)}</div>
         </div>
         
         <ul>
             <li><a href="/health">Health Check</a></li>
-            <li><a href="/status">Statut (JSON)</a></li>
+            <li><a href="/status">Statut JSON</a></li>
         </ul>
     </body>
     </html>
@@ -761,17 +691,10 @@ async def health_check(request):
 async def status_api(request):
     status_data = {
         "status": "running",
-        "version": "2.0",
-        "source_channel": SOURCE_CHANNEL_ID,
-        "source_channel_ok": source_channel_ok,
-        "prediction_channel": PREDICTION_CHANNEL_ID,
-        "prediction_channel_ok": prediction_channel_ok,
+        "version": "2.3",
         "current_game": current_game_number,
         "prediction_offset": prediction_offset,
         "pending_predictions": len(pending_predictions),
-        "max_pending": MAX_PENDING_PREDICTIONS,
-        "queued_predictions": len(queued_predictions),
-        "recent_games": len(recent_games),
         "timestamp": datetime.now().isoformat()
     }
     return web.json_response(status_data)
@@ -791,43 +714,41 @@ async def start_web_server():
 async def start_bot():
     global source_channel_ok, prediction_channel_ok
     try:
-        logger.info("Démarrage du bot v2.0...")
+        logger.info("🚀 Démarrage Bot v2.3...")
+        logger.info("📡 Nouveau design: PRÉDICTION avec 🎯🌪️")
         await client.start(bot_token=BOT_TOKEN)
-        logger.info("Bot Telegram connecté")
-        
-        session = client.session.save()
-        logger.info(f"Session: {session[:50]}...")
+        logger.info("✅ Bot connecté")
         
         me = await client.get_me()
-        username = getattr(me, 'username', 'Unknown')
-        logger.info(f"Bot opérationnel: @{username}")
+        logger.info(f"Bot: @{getattr(me, 'username', 'Unknown')}")
         
-        # Vérifier les canaux
+        # Vérifier canaux
         try:
             source_entity = await client.get_entity(SOURCE_CHANNEL_ID)
             source_channel_ok = True
-            logger.info(f"✅ Canal source: {getattr(source_entity, 'title', 'N/A')}")
+            logger.info(f"✅ Source: {getattr(source_entity, 'title', 'N/A')}")
         except Exception as e:
-            logger.error(f"❌ Canal source inaccessible: {e}")
+            logger.error(f"❌ Source: {e}")
         
         try:
             pred_entity = await client.get_entity(PREDICTION_CHANNEL_ID)
             try:
-                test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🤖 Bot v2.0 connecté!")
+                test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🤖 Bot v2.3 connecté!")
                 await asyncio.sleep(1)
                 await client.delete_messages(PREDICTION_CHANNEL_ID, test_msg.id)
                 prediction_channel_ok = True
-                logger.info(f"✅ Canal prédiction: {getattr(pred_entity, 'title', 'N/A')}")
+                logger.info(f"✅ Prédiction: {getattr(pred_entity, 'title', 'N/A')}")
             except Exception as e:
-                logger.warning(f"⚠️ Canal prédiction sans droits d'écriture: {e}")
+                logger.warning(f"⚠️ Prédiction sans écriture: {e}")
         except Exception as e:
-            logger.error(f"❌ Canal prédiction inaccessible: {e}")
+            logger.error(f"❌ Prédiction: {e}")
         
-        logger.info(f"Configuration: OFFSET={prediction_offset}, MAX_PREDICTIONS={MAX_PENDING_PREDICTIONS}")
+        logger.info(f"⚙️ OFFSET={prediction_offset}, MAX={MAX_PENDING_PREDICTIONS}")
+        logger.info("🎯 3 cartes requises | N→N+3 | Design 📡🎯📋🌪️")
         return True
         
     except Exception as e:
-        logger.error(f"Erreur démarrage: {e}")
+        logger.error(f"Erreur: {e}")
         return False
 
 async def main():
@@ -835,12 +756,11 @@ async def main():
         await start_web_server()
         success = await start_bot()
         if not success:
-            logger.error("Échec du démarrage")
             return
-        logger.info("Bot v2.0 opérationnel - En attente de messages...")
+        logger.info("🤖 Bot v2.3 opérationnel!")
         await client.run_until_disconnected()
     except Exception as e:
-        logger.error(f"Erreur main: {e}")
+        logger.error(f"Erreur: {e}")
     finally:
         await client.disconnect()
 
@@ -848,6 +768,6 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot arrêté")
+        logger.info("Arrêt")
     except Exception as e:
-        logger.error(f"Erreur fatale: {e}")
+        logger.error(f"Fatal: {e}")
