@@ -188,25 +188,14 @@ async def update_prediction_status(game_number: int, new_status: str, result_gro
         if PREDICTION_CHANNEL_ID and PREDICTION_CHANNEL_ID != 0 and message_id > 0 and prediction_channel_ok:
             try:
                 await client.edit_message(PREDICTION_CHANNEL_ID, message_id, updated_msg)
+                
                 logger.info(f"✅ Prédiction #{game_number} mise à jour: {status_text} | Résultat: ({result_group})")
-            except Exception as e:
-                logger.error(f"❌ Erreur mise à jour dans le canal: {e}")
-
-        pred['status'] = new_status
-        logger.info(f"Prédiction #{game_number} statut mis à jour: {new_status}")
-
-        # Supprimer des prédictions actives si terminée
-        if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '✅3️⃣', '❌']:
-            del pending_predictions[game_number]
-            logger.info(f"Prédiction #{game_number} terminée et supprimée")
-
-        return True
-
-    except Exception as e:
-        logger.error(f"Erreur mise à jour prédiction: {e}")
-        return False
-
-async def check_prediction_result(game_number: int, first_group: str):
+            
+                logger.info(f"⏭️ #{pred_n2}: Jeu #{game_number} déjà vérifié")
+            else:
+                suit_count = normalized_group.count(normalized_target)
+                logger.info(f"🔍 Vérification N+2 #{pred_n2}+2 (jeu #{game_number}): {target_suit} trouvé {suit_count} fois")
+                async def check_prediction_result(game_number: int, first_group: str):
     """
     Vérifie si une prédiction est gagnée ou perdue.
     Vérifie séquentiellement: N (immédiat), puis N+1, N+2, N+3 si échecs précédents.
@@ -220,36 +209,50 @@ async def check_prediction_result(game_number: int, first_group: str):
     
     # ========== VÉRIFICATION N (numéro exact) ==========
     if game_number in pending_predictions:
+        # ... etc
+  async def check_prediction_result(game_number: int, first_group: str):
+    """
+    Vérifie si une prédiction est gagnée ou perdue.
+    Vérifie séquentiellement: N (immédiat), puis N+1, N+2, N+3 si échecs précédents.
+    UNIQUEMENT sur les messages finalisés.
+    """
+    normalized_group = normalize_suits(first_group)
+    
+    logger.info(f"=== VÉRIFICATION RÉSULTAT (MESSAGE FINALISÉ) ===")
+    logger.info(f"Jeu source finalisé: #{game_number}")
+    logger.info(f"Groupe analysé: ({first_group})")
+    logger.info(f"Prédictions actives: {list(pending_predictions.keys())}")
+    
+    # ========== VÉRIFICATION N (numéro exact) ==========
+    if game_number in pending_predictions:
         pred = pending_predictions[game_number]
         target_suit = pred['suit']
         normalized_target = normalize_suits(target_suit)
         
-        # Compter les cartes de la couleur prédite
         suit_count = normalized_group.count(normalized_target)
         
-        logger.info(f"🔍 Vérification N #{game_number}: {target_suit} trouvé {suit_count} fois")
+        logger.info(f"🔍 Vérification N #{game_number}: {target_suit} trouvé {suit_count} fois (besoin: 3)")
         
         if suit_count >= 3:
             await update_prediction_status(game_number, '✅0️⃣', first_group)
             logger.info(f"🎉 PRÉDICTION #{game_number} GAGNÉE AU N!")
             return True
         else:
-            # Marquer qu'on a vérifié N, passer à N+1
+            # Incrémenter le compteur pour passer à N+1
             pred['check_count'] = 1
             pred['last_checked_game'] = game_number
-            logger.info(f"⏳ #{game_number}: {suit_count}x {target_suit}, passage à N+1...")
+            logger.info(f"❌ #{game_number}: {suit_count}x {target_suit} trouvé, passage à N+1...")
     
     # ========== VÉRIFICATION N+1 ==========
-    # Vérifier si game_number est N+1 pour une prédiction existante
     pred_n = game_number - 1
     if pred_n in pending_predictions:
         pred = pending_predictions[pred_n]
-        # Ne vérifier N+1 que si on a déjà vérifié N (check_count >= 1)
-        if pred.get('check_count', 0) >= 1:
+        # Vérifier qu'on est bien en phase N+1 (check_count == 1)
+        if pred.get('check_count', 0) == 1:
             target_suit = pred['suit']
             normalized_target = normalize_suits(target_suit)
             
-            # Vérifier qu'on n'a pas déjà vérifié ce jeu pour cette prédiction
+            # Éviter de revérifier le même jeu
             last_checked = pred.get('last_checked_game', 0)
             if game_number <= last_checked:
                 logger.info(f"⏭️ #{pred_n}: Jeu #{game_number} déjà vérifié")
@@ -264,14 +267,14 @@ async def check_prediction_result(game_number: int, first_group: str):
                 else:
                     pred['check_count'] = 2
                     pred['last_checked_game'] = game_number
-                    logger.info(f"⏳ #{pred_n}: {suit_count}x {target_suit} en N+1, passage à N+2...")
+                    logger.info(f"❌ #{pred_n}: {suit_count}x {target_suit} en N+1, passage à N+2...")
     
     # ========== VÉRIFICATION N+2 ==========
     pred_n2 = game_number - 2
     if pred_n2 in pending_predictions:
         pred = pending_predictions[pred_n2]
-        # Ne vérifier N+2 que si on a déjà vérifié N+1 (check_count >= 2)
-        if pred.get('check_count', 0) >= 2:
+        # Vérifier qu'on est bien en phase N+2 (check_count == 2)
+        if pred.get('check_count', 0) == 2:
             target_suit = pred['suit']
             normalized_target = normalize_suits(target_suit)
             
@@ -282,6 +285,50 @@ async def check_prediction_result(game_number: int, first_group: str):
                 suit_count = normalized_group.count(normalized_target)
                 logger.info(f"🔍 Vérification N+2 #{pred_n2}+2 (jeu #{game_number}): {target_suit} trouvé {suit_count} fois")
                 
+                if suit_count >= 3:
+                    await update_prediction_status(pred_n2, '✅2️⃣', first_group)
+                    logger.info(f"🎉 PRÉDICTION #{pred_n2} GAGNÉE AU N+2!")
+                    return True
+                else:
+                    pred['check_count'] = 3
+                    pred['last_checked_game'] = game_number
+                    logger.info(f"❌ #{pred_n2}: {suit_count}x {target_suit} en N+2, passage à N+3...")
+    
+    # ========== VÉRIFICATION N+3 ==========
+    pred_n3 = game_number - 3
+    if pred_n3 in pending_predictions:
+        pred = pending_predictions[pred_n3]
+        # Vérifier qu'on est bien en phase N+3 (check_count == 3)
+        if pred.get('check_count', 0) == 3:
+            target_suit = pred['suit']
+            normalized_target = normalize_suits(target_suit)
+            
+            last_checked = pred.get('last_checked_game', 0)
+            if game_number <= last_checked:
+                logger.info(f"⏭️ #{pred_n3}: Jeu #{game_number} déjà vérifié")
+            else:
+                suit_count = normalized_group.count(normalized_target)
+                logger.info(f"🔍 Vérification N+3 #{pred_n3}+3 (jeu #{game_number}): {target_suit} trouvé {suit_count} fois")
+                
+                if suit_count >= 3:
+                    await update_prediction_status(pred_n3, '✅3️⃣', first_group)
+                    logger.info(f"🎉 PRÉDICTION #{pred_n3} GAGNÉE AU N+3!")
+                    return True
+                else:
+                    # Échec définitif après 4 tentatives
+                    await update_prediction_status(pred_n3, '❌', first_group)
+                    logger.info(f"💔 PRÉDICTION #{pred_n3} PERDUE après N+3")
+                    
+                    # Créer prédiction backup seulement si perdue
+                    backup_game = pred_n3 + prediction_offset
+                    alternate_suit = get_alternate_suit(target_suit)
+                    await create_prediction(backup_game, alternate_suit, pred_n3, is_backup=True)
+                    return False
+    
+    return None
+  
+
+    
                 if suit_count >= 3:
                     await update_prediction_status(pred_n2, '✅2️⃣', first_group)
                     logger.info(f"🎉 PRÉDICTION #{pred_n2} GAGNÉE AU N+2!")
