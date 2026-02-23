@@ -84,15 +84,6 @@ def normalize_suits(group_str: str) -> str:
         logger.error(f"Erreur normalisation: {e}")
         return group_str
 
-def get_suits_in_group(group_str: str):
-    """Retourne la liste des couleurs présentes dans le groupe"""
-    try:
-        normalized = normalize_suits(group_str)
-        return [s for s in ALL_SUITS if s in normalized]
-    except Exception as e:
-        logger.error(f"Erreur get suits: {e}")
-        return []
-
 def extract_first_card_suit(group_str: str):
     """Extrait la couleur de la première carte du groupe"""
     try:
@@ -125,7 +116,7 @@ def is_message_finalized(message: str) -> bool:
 def format_prediction_message(game_number: int, suit: str, status: str = "⏳ EN COURS", result_group: str = None) -> str:
     """
     Formate le message de prédiction:
-    📡 PRÉDICTION #116
+    📡 PRÉDICTION #74
     🎯 Couleur: ❤️ Cœur
     🌪️ Statut: ⏳ EN COURS / 🍯✅0️⃣ / 🍯✅1️⃣ / 🍯✅2️⃣ / 🍯✅3️⃣ / 😶❌
     """
@@ -230,6 +221,8 @@ async def check_prediction_result(game_number: int, first_group: str):
     Vérifie si une prédiction est gagnée ou perdue.
     Condition: AU MOINS 1 carte de la couleur dans le premier groupe
     Vérification sur: N (prédit), N+1 (1er rattrapage), N+2 (2ème), N+3 (3ème)
+    
+    CORRECTION: Continue automatiquement après une perte avec une nouvelle prédiction
     """
     try:
         normalized_group = normalize_suits(first_group)
@@ -242,10 +235,11 @@ async def check_prediction_result(game_number: int, first_group: str):
         # Créer une copie de la liste pour éviter les modifications pendant l'itération
         predictions_to_check = list(pending_predictions.items())
         found_winner = False
+        lost_prediction = None
         
         for pred_game, pred in predictions_to_check:
             try:
-                # Vérifier si la prédiction existe toujours (peut avoir été supprimée)
+                # Vérifier si la prédiction existe toujours
                 if pred_game not in pending_predictions:
                     continue
                     
@@ -263,23 +257,24 @@ async def check_prediction_result(game_number: int, first_group: str):
                     continue
                 
                 # C'est le bon numéro, vérifier le résultat
+                # CONDITION: AU MOINS 1 carte de la couleur
                 suit_count = normalized_group.count(normalized_target)
-                has_card = suit_count >= 1  # AU MOINS 1 carte suffit
+                has_card = suit_count >= 1  # AU MOINS 1 carte suffit !
                 
-                logger.info(f"  🔍 VÉRIFICATION #{pred_game}: {target_suit} trouvé {suit_count} fois")
+                logger.info(f"  🔍 VÉRIFICATION #{pred_game}: {target_suit} trouvé {suit_count} fois (condition: ≥1)")
                 
                 if has_card:
-                    # GAGNÉ !
+                    # GAGNÉ ! Finaliser immédiatement avec le bon statut
                     status_map = {0: '🍯✅0️⃣', 1: '🍯✅1️⃣', 2: '🍯✅2️⃣', 3: '🍯✅3️⃣'}
                     new_status = status_map.get(check_count, '🍯✅0️⃣')
                     
                     await update_prediction_status(pred_game, new_status, first_group)
-                    logger.info(f"  🎉 PRÉDICTION #{pred_game} GAGNÉE! Statut: {new_status}")
+                    logger.info(f"  🎉 PRÉDICTION #{pred_game} GAGNÉE! {suit_count}x {target_suit} trouvé | Statut: {new_status}")
                     found_winner = True
                     break  # Sortir après le premier gagnant trouvé
                     
                 else:
-                    # PAS trouvé, passer à l'étape suivante
+                    # PAS trouvé, passer à l'étape suivante (rattrapage)
                     new_check_count = check_count + 1
                     
                     # Vérifier si la prédiction existe toujours avant de modifier
@@ -289,23 +284,45 @@ async def check_prediction_result(game_number: int, first_group: str):
                     pending_predictions[pred_game]['check_count'] = new_check_count
                     pending_predictions[pred_game]['last_checked_game'] = game_number
                     
+                    # Vérifier si on a épuisé les 3 rattrapages (4 tentatives total: N, N+1, N+2, N+3)
                     if new_check_count > 3:
-                        # Échec définitif après 3 rattrapages
+                        # Échec définitif après N+3 (3ème rattrapage), finaliser comme perdu
                         await update_prediction_status(pred_game, '😶❌', first_group)
-                        logger.info(f"  💔 PRÉDICTION #{pred_game} PERDUE après 3 rattrapages")
+                        logger.info(f"  💔 PRÉDICTION #{pred_game} PERDUE après 3 rattrapages (aucune carte trouvée)")
                         
-                        # Créer backup
-                        suit = pred['suit']
-                        backup_game = pred_game + prediction_offset
-                        alternate_suit = get_alternate_suit(suit)
-                        await create_prediction(backup_game, alternate_suit, pred_game, is_backup=True)
+                        # CORRECTION: Sauvegarder les infos pour créer une nouvelle prédiction continue
+                        lost_prediction = {
+                            'suit': pred['suit'],
+                            'base_game': pred['base_game'],
+                            'lost_at_game': game_number
+                        }
                     else:
+                        # Passer au rattrapage suivant
                         rattrapage_txt = {1: '1er', 2: '2ème', 3: '3ème'}.get(new_check_count, f'{new_check_count}ème')
-                        logger.info(f"  ⏳ #{pred_game}: Passage au {rattrapage_txt} rattrapage")
+                        logger.info(f"  ⏳ #{pred_game}: Aucune carte {target_suit}, passage au {rattrapage_txt} rattrapage (vérifiera #{pred_game + new_check_count})")
                         
             except Exception as e:
                 logger.error(f"  ❌ Erreur traitement prédiction #{pred_game}: {e}")
                 continue
+        
+        # CORRECTION: Si une prédiction a été perdue, créer immédiatement une nouvelle prédiction
+        # pour continuer la chaîne (N+4, nouvelle couleur basée sur le jeu actuel)
+        if lost_prediction:
+            try:
+                # Nouvelle prédiction basée sur le jeu actuel (où la perte s'est produite)
+                new_target_game = game_number + prediction_offset
+                new_suit = extract_first_card_suit(first_group)
+                
+                if new_suit and new_target_game not in pending_predictions:
+                    logger.info(f"🔄 CONTINUATION: Création nouvelle prédiction #{new_target_game} après perte")
+                    await create_prediction(new_target_game, new_suit, game_number, is_continuation=True)
+                    logger.info(f"   ✨ Nouvelle prédiction #{new_target_game} - {new_suit} (continuation après perte)")
+                elif new_target_game in pending_predictions:
+                    logger.info(f"   ⏭️ Prédiction #{new_target_game} existe déjà (continuation)")
+                else:
+                    logger.warning(f"   ⚠️ Impossible d'extraire couleur pour continuation")
+            except Exception as e:
+                logger.error(f"   ❌ Erreur création continuation: {e}")
         
         return found_winner
         
@@ -315,8 +332,11 @@ async def check_prediction_result(game_number: int, first_group: str):
         logger.error(traceback.format_exc())
         return False
 
-async def create_prediction(target_game: int, suit: str, base_game: int, is_backup: bool = False):
-    """Crée une nouvelle prédiction"""
+async def create_prediction(target_game: int, suit: str, base_game: int, is_backup: bool = False, is_continuation: bool = False):
+    """
+    Crée une nouvelle prédiction
+    CORRECTION: Ajout du paramètre is_continuation pour différencier les prédictions de continuation
+    """
     try:
         if target_game in pending_predictions or target_game in queued_predictions:
             logger.info(f"Prédiction #{target_game} déjà existante, ignorée")
@@ -324,6 +344,10 @@ async def create_prediction(target_game: int, suit: str, base_game: int, is_back
         
         # Envoyer immédiatement la prédiction
         await send_prediction_to_channel(target_game, suit, base_game)
+        
+        if is_continuation:
+            logger.info(f"🔄 Prédiction de continuation créée: #{target_game} après perte de #{base_game}")
+        
         return True
     except Exception as e:
         logger.error(f"Erreur création prédiction: {e}")
@@ -495,11 +519,13 @@ async def cmd_start(event):
         return
     
     try:
-        await event.respond("""🤖 **Bot de Prédiction Baccarat - v3.5**
+        await event.respond("""🤖 **Bot de Prédiction Baccarat - v3.6**
 
-📡 PRÉDICTION #116
+📡 PRÉDICTION #74
 🎯 Couleur: ❤️ Cœur
 🌪️ Statut: ⏳ EN COURS
+
+**Condition de victoire: AU MOINS 1 carte dans le premier groupe**
 
 **Système de rattrapage:**
 • 🍯✅0️⃣ = Gagné au numéro prédit (N)
@@ -507,6 +533,8 @@ async def cmd_start(event):
 • 🍯✅2️⃣ = Gagné au 2ème rattrapage (N+2)
 • 🍯✅3️⃣ = Gagné au 3ème rattrapage (N+3)
 • 😶❌ = Perdu (après 3 rattrapages)
+
+**🔄 CONTINUATION AUTO:** Après une perte, le jeu continue automatiquement avec une nouvelle prédiction basée sur le dernier résultat!
 
 **Commandes:**
 • `/status` - Voir les prédictions
@@ -563,7 +591,8 @@ async def cmd_status(event):
         status_msg += f"🎮 Jeu: #{current_game_number}\n"
         status_msg += f"📏 Décalage: +{prediction_offset}\n"
         status_msg += f"🎯 Condition: ≥1 carte dans 1er groupe\n"
-        status_msg += f"🔁 Rattrapages: 3 maximum (N+1, N+2, N+3)\n\n"
+        status_msg += f"🔁 Rattrapages: 3 maximum (N+1, N+2, N+3)\n"
+        status_msg += f"🔄 Continuation: AUTO après perte\n\n"
         
         if pending_predictions:
             status_msg += f"**🔮 Actives ({len(pending_predictions)}):**\n"
@@ -598,38 +627,34 @@ async def cmd_help(event):
         return
     
     try:
-        await event.respond(f"""📖 **Aide v3.5 - Système de Rattrapage**
+        await event.respond(f"""📖 **Aide v3.6 - Système Continu**
 
 **Format:**
 📡 PRÉDICTION #N
 🎯 Couleur: [suit] [nom]
 🌪️ Statut: [statut]
 
-**Fonctionnement:**
+**Condition de victoire: AU MOINS 1 carte** de la couleur dans la **première parenthèse**
 
-1️⃣ **Prédiction** (immédiate):
-   - Dès réception du message source
-   - Prédit sur N+{prediction_offset}
+**Exemple:**
+📡 PRÉDICTION #74 (prédit depuis #72)
+🎯 Couleur: ❤️ Cœur
+🌪️ Statut: ⏳ EN COURS
 
-2️⃣ **Vérification** (sur message finalisé uniquement):
-   
-   **Étape 0** - Numéro prédit (N):
-   • Si carte trouvée → 🍯✅0️⃣ (GAGNÉ)
-   • Sinon → passe au 1er rattrapage
-   
-   **Étape 1** - 1er rattrapage (N+1):
-   • Si carte trouvée → 🍯✅1️⃣ (GAGNÉ)
-   • Sinon → passe au 2ème rattrapage
-   
-   **Étape 2** - 2ème rattrapage (N+2):
-   • Si carte trouvée → 🍯✅2️⃣ (GAGNÉ)
-   • Sinon → passe au 3ème rattrapage
-   
-   **Étape 3** - 3ème rattrapage (N+3):
-   • Si carte trouvée → 🍯✅3️⃣ (GAGNÉ)
-   • Sinon → 😶❌ (PERDU)
+→ #N74: 5(2♦️3♦️K♥️) 🔰 ... 
+   K♥️ trouvé = GAGNÉ ! → 🍯✅0️⃣
 
-**Condition:** Au moins **1 carte** de la couleur dans la **première parenthèse**""")
+**Système de rattrapage:**
+• 🍯✅0️⃣ = Trouvé au numéro prédit (N)
+• 🍯✅1️⃣ = Trouvé au 1er rattrapage (N+1)
+• 🍯✅2️⃣ = Trouvé au 2ème rattrapage (N+2)
+• 🍯✅3️⃣ = Trouvé au 3ème rattrapage (N+3)
+• 😶❌ = Perdu (pas trouvé après 3 rattrapages)
+
+**🔄 CONTINUATION AUTOMATIQUE:**
+Quand une prédiction est perdue (😶❌), le bot crée **automatiquement** une nouvelle prédiction basée sur le dernier jeu finalisé, assurant une continuité sans interruption!
+
+**Décalage actuel:** +{prediction_offset}""")
     except Exception as e:
         logger.error(f"Erreur help: {e}")
 
@@ -665,21 +690,23 @@ async def index(request):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Bot Baccarat v3.5</title>
+            <title>Bot Baccarat v3.6</title>
             <meta charset="utf-8">
             <style>
                 body {{ font-family: Arial; margin: 40px; background: #1a1a2e; color: #eee; }}
                 h1 {{ color: #00d4ff; }}
                 .status {{ background: #16213e; padding: 20px; border-radius: 10px; margin: 20px 0; }}
+                .feature {{ color: #00ff88; }}
             </style>
         </head>
         <body>
-            <h1>📡 Bot Baccarat v3.5</h1>
+            <h1>📡 Bot Baccarat v3.6</h1>
             <div class="status">
                 <div><strong>Jeu:</strong> #{current_game_number}</div>
                 <div><strong>Décalage:</strong> +{prediction_offset}</div>
                 <div><strong>Actives:</strong> {len(pending_predictions)}</div>
                 <div><strong>Règle:</strong> ≥1 carte, 3 rattrapages max</div>
+                <div class="feature"><strong>🔄 Continuation:</strong> AUTO après perte</div>
             </div>
         </body>
         </html>
@@ -711,8 +738,9 @@ async def start_web_server():
 async def start_bot():
     global source_channel_ok, prediction_channel_ok
     try:
-        logger.info("🚀 Démarrage v3.5...")
-        logger.info("🎯 Système: N + 3 rattrapages maximum")
+        logger.info("🚀 Démarrage v3.6...")
+        logger.info("🎯 Condition: ≥1 carte dans le premier groupe")
+        logger.info("🔄 Continuation auto après perte activée")
         await client.start(bot_token=BOT_TOKEN)
         logger.info("✅ Bot connecté")
         
@@ -729,7 +757,7 @@ async def start_bot():
         try:
             pred_entity = await client.get_entity(PREDICTION_CHANNEL_ID)
             try:
-                test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🤖 v3.5 connecté!")
+                test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🤖 v3.6 connecté! Continuation auto activée.")
                 await asyncio.sleep(1)
                 await client.delete_messages(PREDICTION_CHANNEL_ID, test_msg.id)
                 prediction_channel_ok = True
@@ -741,6 +769,7 @@ async def start_bot():
         
         logger.info(f"⚙️ OFFSET=+{prediction_offset}")
         logger.info("🔁 Rattrapages: N+1, N+2, N+3 (3 max)")
+        logger.info("🔄 CONTINUATION: Création auto après perte")
         return True
         
     except Exception as e:
