@@ -30,8 +30,8 @@ PREDICTION_CHANNEL_ID = parse_channel_id('PREDICTION_CHANNEL_ID', '-100366446888
 API_ID = int(os.getenv('API_ID') or '29177661')
 API_HASH = os.getenv('API_HASH') or 'a8639172fa8d35dbfd8ea46286d349ab'
 
-# Token du bot (@BotFather)
-BOT_TOKEN = os.getenv('BOT_TOKEN') or '8458163781:AAFj5fth5J-nRjHHd0-hlxkX3r0_ClNtlwQ'
+# Token du bot (@BotFather) - MODIFIÉ LE 2026-02-24
+BOT_TOKEN = os.getenv('BOT_TOKEN') or '8458163781:AAEtBcYICeVg_m3XAEQUnSwEX3G_06DA-YI'
 
 # ID de l'administrateur (pour les commandes privées)
 ADMIN_ID = int(os.getenv('ADMIN_ID') or '6180384006')
