@@ -51,6 +51,10 @@ PORT = int(os.getenv('PORT') or '10000')
 # Ex: Si N=718 et PREDICTION_OFFSET=2 → Prédiction pour #720
 PREDICTION_OFFSET = int(os.getenv('PREDICTION_OFFSET') or '2')
 
+# Timeout de prédiction (défaut: 10) - Nombre de jeux avant expiration d'une prédiction
+# Si le jeu actuel dépasse predicted_num + 10, la prédiction expire
+PREDICTION_TIMEOUT = int(os.getenv('PREDICTION_TIMEOUT') or '10')
+
 # ============================================
 # MAPPING DES COULEURS
 # ============================================
