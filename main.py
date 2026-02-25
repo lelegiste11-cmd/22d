@@ -56,6 +56,14 @@ prediction_channel_ok = False
 # ============ VARIABLES GLOBALES ============
 transfer_enabled = True
 
+# ============ NOUVELLES VARIABLES POUR GESTION DES PRÉDICTIONS ============
+prediction_in_progress = False  # True si une prédiction est en cours (non finalisée)
+last_prediction_time = None  # Timestamp de la dernière prédiction créée
+last_prediction_number = None  # Numéro de la dernière prédiction créée
+PREDICTION_GAP = 2  # Écart de +2 numéros entre les prédictions
+RESTART_TIMEOUT_MINUTES = 12  # Redémarrage après 12 minutes d'inactivité (entre 10-15)
+restart_task = None  # Tâche de redémarrage automatique
+
 def extract_game_number(message: str):
     """Extrait le numéro de jeu du message"""
     try:
@@ -137,8 +145,48 @@ def format_prediction_message(game_number: int, suit: str, status: str = "⏳ EN
         logger.error(f"Erreur format message: {e}")
         return f"Erreur formatage #{game_number}"
 
+async def reset_restart_timer():
+    """Réinitialise le timer de redémarrage automatique"""
+    global restart_task, last_prediction_time
+    
+    # Mettre à jour le timestamp de dernière activité
+    last_prediction_time = datetime.now()
+    
+    # Annuler l'ancienne tâche si elle existe
+    if restart_task and not restart_task.done():
+        restart_task.cancel()
+        try:
+            await restart_task
+        except asyncio.CancelledError:
+            pass
+    
+    # Créer une nouvelle tâche de redémarrage
+    restart_task = asyncio.create_task(restart_after_timeout())
+
+async def restart_after_timeout():
+    """Tâche qui redémarre le bot après un timeout d'inactivité"""
+    try:
+        timeout_seconds = RESTART_TIMEOUT_MINUTES * 60
+        logger.info(f"⏱️ Timer de redémarrage démarré ({RESTART_TIMEOUT_MINUTES} minutes)")
+        
+        await asyncio.sleep(timeout_seconds)
+        
+        # Si on arrive ici, c'est que le timeout a expiré
+        logger.warning(f"⏰ TIMEOUT: Aucune prédiction depuis {RESTART_TIMEOUT_MINUTES} minutes")
+        logger.warning("🔄 Redémarrage automatique du bot...")
+        
+        # Forcer la déconnexion pour trigger le redémarrage
+        await client.disconnect()
+        
+    except asyncio.CancelledError:
+        logger.info("⏱️ Timer de redémarrage réinitialisé")
+    except Exception as e:
+        logger.error(f"Erreur dans le timer de redémarrage: {e}")
+
 async def send_prediction_to_channel(target_game: int, suit: str, base_game: int):
     """Envoie une prédiction au canal de prédiction immédiatement"""
+    global prediction_in_progress, last_prediction_time, last_prediction_number
+    
     try:
         prediction_msg = format_prediction_message(target_game, suit, "⏳ EN COURS")
         
@@ -154,6 +202,14 @@ async def send_prediction_to_channel(target_game: int, suit: str, base_game: int
         else:
             logger.warning(f"⚠️ Canal de prédiction non accessible, prédiction non envoyée")
 
+        # Marquer qu'une prédiction est en cours
+        prediction_in_progress = True
+        last_prediction_time = datetime.now()
+        last_prediction_number = target_game
+        
+        # Démarrer le timer de redémarrage
+        await reset_restart_timer()
+
         # Initialisation - check_stage: 0=N, 1=N+1, 2=N+2, 3=N+3
         pending_predictions[target_game] = {
             'message_id': msg_id,
@@ -165,6 +221,7 @@ async def send_prediction_to_channel(target_game: int, suit: str, base_game: int
         }
 
         logger.info(f"Prédiction active créée: Jeu #{target_game} - {suit} (basé sur #{base_game})")
+        logger.info(f"🔒 Nouvelles prédictions BLOQUÉES jusqu'à finalisation de #{target_game}")
         return msg_id
 
     except Exception as e:
@@ -177,6 +234,8 @@ async def update_prediction_status(game_number: int, new_status: str, result_gro
     """
     Met à jour le statut d'une prédiction et la supprime des actives si terminée
     """
+    global prediction_in_progress
+    
     try:
         if game_number not in pending_predictions:
             logger.warning(f"⚠️ Prédiction #{game_number} non trouvée pour mise à jour")
@@ -206,6 +265,11 @@ async def update_prediction_status(game_number: int, new_status: str, result_gro
             if game_number in pending_predictions:
                 del pending_predictions[game_number]
                 logger.info(f"Prédiction #{game_number} terminée et supprimée")
+            
+            # Libérer le blocage des nouvelles prédictions
+            prediction_in_progress = False
+            logger.info(f"🔓 Prédiction finalisée! Nouvelles prédictions DÉBLOQUÉES")
+            logger.info(f"📋 Prochaine prédiction possible dans +{PREDICTION_GAP} numéros")
 
         return True
 
@@ -220,13 +284,6 @@ async def check_prediction_result(game_number: int, first_group: str):
     Vérifie si une prédiction est gagnée ou perdue.
     Condition: AU MOINS 1 carte de la couleur dans le premier groupe
     Vérification sur: N (prédit), N+1 (1er rattrapage), N+2 (2ème), N+3 (3ème)
-    
-    NOUVELLE LOGIQUE:
-    - Pour chaque prédiction, on vérifie uniquement si game_number correspond au stage attendu
-    - Stage 0: attend le numéro prédit (pred_game)
-    - Stage 1: attend pred_game+1
-    - Stage 2: attend pred_game+2
-    - Stage 3: attend pred_game+3
     """
     try:
         normalized_group = normalize_suits(first_group)
@@ -274,7 +331,6 @@ async def check_prediction_result(game_number: int, first_group: str):
                     await update_prediction_status(pred_game, new_status, first_group)
                     logger.info(f"  🎉 PRÉDICTION #{pred_game} GAGNÉE au stage {check_stage}! {suit_count}x {target_suit} | Statut: {new_status}")
                     found_winner = True
-                    # Ne pas break ici - une autre prédiction pourrait aussi être à ce numéro
                     
                 else:
                     # PAS trouvé, passer au stage suivant (rattrapage)
@@ -338,10 +394,10 @@ async def create_prediction(target_game: int, suit: str, base_game: int, is_back
 async def process_new_message(message_text: str, chat_id: int, is_finalized: bool = False):
     """
     Traite un nouveau message du canal source.
-    - CRÉE les prédictions IMMÉDIATEMENT
+    - CRÉE les prédictions UNIQUEMENT SI aucune prédiction en cours ET respect du gap de +2
     - VÉRIFIE et FINALISE les résultats UNIQUEMENT si finalisé
     """
-    global current_game_number, last_transferred_game
+    global current_game_number, last_transferred_game, last_prediction_number
     
     try:
         game_number = extract_game_number(message_text)
@@ -370,21 +426,55 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
         logger.info(f"=" * 60)
         logger.info(f"📨 TRAITEMENT Jeu #{game_number} | Finalisé: {is_finalized}")
         logger.info(f"   Premier groupe: ({first_group})")
+        logger.info(f"   🔒 Prédiction en cours: {prediction_in_progress} | Dernière: #{last_prediction_number}")
         
-        # ========== CRÉATION DE PRÉDICTION (TOUJOURS) ==========
+        # ========== CRÉATION DE PRÉDICTION (CONDITIONS STRICTES) ==========
         try:
             first_card_suit = extract_first_card_suit(first_group)
             
             if first_card_suit:
                 target_game = game_number + prediction_offset
                 
-                if target_game not in pending_predictions and len(pending_predictions) < MAX_PENDING_PREDICTIONS:
-                    await create_prediction(target_game, first_card_suit, game_number)
-                    logger.info(f"   🎯 NOUVELLE PRÉDICTION: #{target_game} - {first_card_suit} (dans +{prediction_offset} jeux)")
-                elif target_game in pending_predictions:
-                    logger.info(f"   ⏭️ Prédiction #{target_game} existe déjà")
+                # VÉRIFICATION 1: Une prédiction est-elle déjà en cours ?
+                if prediction_in_progress:
+                    logger.info(f"   ⛔ BLOQUÉ: Prédiction en cours (attente finalisation)")
+                    logger.info(f"   ⏳ Impossible de prédire #{target_game} maintenant")
+                
+                # VÉRIFICATION 2: Respect du gap de +2 numéros depuis la dernière prédiction ?
+                elif last_prediction_number is not None:
+                    gap_needed = PREDICTION_GAP
+                    actual_gap = game_number - (last_prediction_number - prediction_offset)
+                    # last_prediction_number = base_game + prediction_offset
+                    # Donc base_game = last_prediction_number - prediction_offset
+                    # Gap = game_number actuel - base_game de la dernière prédiction
+                    
+                    # Calcul correct du gap
+                    last_base_game = last_prediction_number - prediction_offset
+                    games_since_last = game_number - last_base_game
+                    
+                    if games_since_last < gap_needed:
+                        logger.info(f"   ⛔ BLOQUÉ: Gap insuffisant ({games_since_last}/{gap_needed})")
+                        logger.info(f"   📊 Dernière prédiction: #{last_prediction_number} (base: #{last_base_game})")
+                        logger.info(f"   ⏳ Prochaine prédiction possible dans {gap_needed - games_since_last} jeux")
+                    else:
+                        # OK pour créer la prédiction
+                        if target_game not in pending_predictions and len(pending_predictions) < MAX_PENDING_PREDICTIONS:
+                            await create_prediction(target_game, first_card_suit, game_number)
+                            logger.info(f"   🎯 NOUVELLE PRÉDICTION: #{target_game} - {first_card_suit}")
+                            logger.info(f"   📏 Gap respecté: +{games_since_last} jeux depuis dernière base")
+                        elif target_game in pending_predictions:
+                            logger.info(f"   ⏭️ Prédiction #{target_game} existe déjà")
+                        else:
+                            logger.info(f"   ⏸️ Max prédictions atteint ({MAX_PENDING_PREDICTIONS})")
                 else:
-                    logger.info(f"   ⏸️ Max prédictions atteint ({MAX_PENDING_PREDICTIONS})")
+                    # Première prédiction (aucune historique)
+                    if target_game not in pending_predictions and len(pending_predictions) < MAX_PENDING_PREDICTIONS:
+                        await create_prediction(target_game, first_card_suit, game_number)
+                        logger.info(f"   🎯 PREMIÈRE PRÉDICTION: #{target_game} - {first_card_suit}")
+                    elif target_game in pending_predictions:
+                        logger.info(f"   ⏭️ Prédiction #{target_game} existe déjà")
+                    else:
+                        logger.info(f"   ⏸️ Max prédictions atteint ({MAX_PENDING_PREDICTIONS})")
             else:
                 logger.warning(f"   ⚠️ Impossible d'extraire la couleur de: ({first_group})")
         except Exception as e:
@@ -499,13 +589,18 @@ async def cmd_start(event):
         return
     
     try:
-        await event.respond("""🤖 **Bot de Prédiction Baccarat - v3.5 CORRIGÉ**
+        await event.respond("""🤖 **Bot de Prédiction Baccarat - v4.0**
 
 📡 PRÉDICTION #74
 🎯 Couleur: ❤️ Cœur
 🌪️ Statut: ⏳ EN COURS
 
-**Condition de victoire: AU MOINS 1 carte dans le premier groupe**
+**🆕 NOUVEAUTÉS v4.0:**
+• 🔒 Une seule prédiction à la fois (attente finalisation)
+• 📏 Gap de +2 numéros obligatoire entre prédictions
+• ⏰ Redémarrage auto après 12min d'inactivité
+
+**Condition de victoire:** AU MOINS 1 carte dans le premier groupe
 
 **Système de rattrapage:**
 • 🍯✅0️⃣ = Gagné au numéro prédit (N)
@@ -514,11 +609,10 @@ async def cmd_start(event):
 • 🍯✅3️⃣ = Gagné au 3ème rattrapage (N+3)
 • 😶❌ = Perdu (après 3 rattrapages)
 
-**NOUVEAUTÉ:** Vérification stricte par numéros consécutifs
-
 **Commandes:**
-• `/status` - Voir les prédictions
+• `/status` - Voir les prédictions et état du système
 • `/setoffset <n>` - Changer le décalage
+• `/forceunlock` - Débloquer manuellement (admin)
 • `/help` - Aide détaillée""")
     except Exception as e:
         logger.error(f"Erreur cmd_start: {e}")
@@ -567,14 +661,26 @@ async def cmd_status(event):
             await event.respond("⛔ Réservé admin")
             return
         
-        status_msg = f"📊 **État:**\n\n"
-        status_msg += f"🎮 Jeu: #{current_game_number}\n"
+        status_msg = f"📊 **État du Système v4.0:**\n\n"
+        status_msg += f"🎮 Jeu actuel: #{current_game_number}\n"
         status_msg += f"📏 Décalage: +{prediction_offset}\n"
-        status_msg += f"🎯 Condition: ≥1 carte dans 1er groupe\n"
-        status_msg += f"🔁 Rattrapages: 3 maximum (N+1, N+2, N+3)\n\n"
+        status_msg += f"🔒 Prédiction en cours: {'OUI' if prediction_in_progress else 'NON'}\n"
+        
+        if last_prediction_number:
+            status_msg += f"🎯 Dernière prédiction: #{last_prediction_number}\n"
+        
+        if last_prediction_time:
+            elapsed = datetime.now() - last_prediction_time
+            minutes = elapsed.total_seconds() / 60
+            status_msg += f"⏱️ Dernière activité: {minutes:.1f}min ago\n"
+            status_msg += f"⏰ Redémarrage auto dans: {max(0, RESTART_TIMEOUT_MINUTES - minutes):.1f}min\n"
+        
+        status_msg += f"\n🎯 Condition: ≥1 carte dans 1er groupe\n"
+        status_msg += f"🔁 Rattrapages: 3 max (N+1, N+2, N+3)\n"
+        status_msg += f"📋 Gap requis: +{PREDICTION_GAP} numéros\n\n"
         
         if pending_predictions:
-            status_msg += f"**🔮 Actives ({len(pending_predictions)}):**\n"
+            status_msg += f"**🔮 Prédictions Actives ({len(pending_predictions)}):**\n"
             for game_num, pred in sorted(pending_predictions.items()):
                 try:
                     suit_name = get_suit_full_name(pred['suit'])
@@ -597,11 +703,46 @@ async def cmd_status(event):
                     status_msg += f"• #{game_num}: Erreur affichage\n"
         else:
             status_msg += "**🔮 Aucune prédiction active**\n"
+            if not prediction_in_progress:
+                status_msg += "\n✅ Système prêt pour nouvelle prédiction"
         
         await event.respond(status_msg)
     except Exception as e:
         logger.error(f"Erreur status: {e}")
         await event.respond("❌ Erreur affichage status")
+
+@client.on(events.NewMessage(pattern='/forceunlock'))
+async def cmd_force_unlock(event):
+    """Commande admin pour débloquer manuellement le système"""
+    if event.is_group or event.is_channel:
+        return
+    
+    try:
+        if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
+            await event.respond("⛔ Réservé admin")
+            return
+        
+        global prediction_in_progress, pending_predictions
+        
+        # Forcer le déblocage
+        prediction_in_progress = False
+        pending_predictions.clear()
+        
+        await event.respond("""🔓 **SYSTÈME DÉBLOQUÉ MANUELLEMENT**
+
+⚠️ Toutes les prédictions ont été effacées.
+Le système est prêt pour une nouvelle prédiction.
+
+État actuel:
+• 🔒 Prédiction en cours: NON
+• 🔮 Prédictions actives: 0
+• ✅ Nouvelles prédictions: AUTORISÉES""")
+        
+        logger.warning(f"🔓 SYSTÈME DÉBLOQUÉ MANUELLEMENT par admin {event.sender_id}")
+        
+    except Exception as e:
+        logger.error(f"Erreur force unlock: {e}")
+        await event.respond("❌ Erreur")
 
 @client.on(events.NewMessage(pattern='/help'))
 async def cmd_help(event):
@@ -609,14 +750,12 @@ async def cmd_help(event):
         return
     
     try:
-        await event.respond(f"""📖 **Aide v3.5 CORRIGÉE - Système de Rattrapage**
+        await event.respond(f"""📖 **Aide v4.0 - Système de Prédiction**
 
-**Format:**
-📡 PRÉDICTION #N
-🎯 Couleur: [suit] [nom]
-🌪️ Statut: [statut]
-
-**Condition de victoire: AU MOINS 1 carte** de la couleur dans la **première parenthèse**
+**🆕 GESTION DES PRÉDICTIONS:**
+• 🔒 **Une seule prédiction à la fois** - Attendre la finalisation avant nouvelle prédiction
+• 📏 **Gap de +{PREDICTION_GAP} numéros** - Après prédiction #N (basée sur #X), prochaine sur #X+{PREDICTION_GAP}
+• ⏰ **Redémarrage auto** - Après {RESTART_TIMEOUT_MINUTES} minutes sans activité
 
 **Exemple de déroulement:**
 
@@ -625,7 +764,12 @@ async def cmd_help(event):
 • 🍯✅1️⃣ = Trouvé au 1er rattrapage (N+1)
 • 🍯✅2️⃣ = Trouvé au 2ème rattrapage (N+2)
 • 🍯✅3️⃣ = Trouvé au 3ème rattrapage (N+3)
-• 😶❌ = Perdu (pas trouvé après 3 rattrapages)
+• 😶❌ = Perdu (après 3 rattrapages)
+
+**Commandes admin:**
+• `/status` - État complet du système
+• `/forceunlock` - Débloquer en cas de problème
+• `/setoffset <n>` - Changer décalage (défaut: {PREDICTION_OFFSET})
 
 **Décalage actuel:** +{prediction_offset}""")
     except Exception as e:
@@ -663,22 +807,27 @@ async def index(request):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Bot Baccarat v3.5 CORRIGÉ</title>
+            <title>Bot Baccarat v4.0</title>
             <meta charset="utf-8">
             <style>
                 body {{ font-family: Arial; margin: 40px; background: #1a1a2e; color: #eee; }}
                 h1 {{ color: #00d4ff; }}
                 .status {{ background: #16213e; padding: 20px; border-radius: 10px; margin: 20px 0; }}
+                .locked {{ color: #ff6b6b; }}
+                .unlocked {{ color: #51cf66; }}
             </style>
         </head>
         <body>
-            <h1>📡 Bot Baccarat v3.5 CORRIGÉ</h1>
+            <h1>📡 Bot Baccarat v4.0</h1>
             <div class="status">
                 <div><strong>Jeu:</strong> #{current_game_number}</div>
                 <div><strong>Décalage:</strong> +{prediction_offset}</div>
+                <div class="{'locked' if prediction_in_progress else 'unlocked'}">
+                    <strong>État:</strong> {'🔒 BLOQUÉ (prédiction en cours)' if prediction_in_progress else '🔓 DISPONIBLE'}
+                </div>
                 <div><strong>Actives:</strong> {len(pending_predictions)}</div>
-                <div><strong>Règle:</strong> ≥1 carte, 3 rattrapages max</div>
-                <div><strong>Correction:</strong> Vérification stricte N, N+1, N+2, N+3</div>
+                <div><strong>Gap requis:</strong> +{PREDICTION_GAP} numéros</div>
+                <div><strong>Timeout redémarrage:</strong> {RESTART_TIMEOUT_MINUTES} min</div>
             </div>
         </body>
         </html>
@@ -708,11 +857,17 @@ async def start_web_server():
         logger.error(traceback.format_exc())
 
 async def start_bot():
-    global source_channel_ok, prediction_channel_ok
+    global source_channel_ok, prediction_channel_ok, restart_task
+    
+    # Initialiser le timer de redémarrage au démarrage
+    await reset_restart_timer()
+    
     try:
-        logger.info("🚀 Démarrage v3.5 CORRIGÉ...")
-        logger.info("🎯 Condition: ≥1 carte dans le premier groupe")
-        logger.info("🔧 Correction: Vérification stricte par numéros consécutifs")
+        logger.info("🚀 Démarrage v4.0...")
+        logger.info("🔒 Mode: Une prédiction à la fois")
+        logger.info(f"📏 Gap requis: +{PREDICTION_GAP} numéros")
+        logger.info(f"⏰ Timeout redémarrage: {RESTART_TIMEOUT_MINUTES} minutes")
+        
         await client.start(bot_token=BOT_TOKEN)
         logger.info("✅ Bot connecté")
         
@@ -729,7 +884,7 @@ async def start_bot():
         try:
             pred_entity = await client.get_entity(PREDICTION_CHANNEL_ID)
             try:
-                test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🤖 v3.5 CORRIGÉ connecté!")
+                test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🤖 v4.0 connecté! 🔒 Mode: 1 prédiction à la fois")
                 await asyncio.sleep(1)
                 await client.delete_messages(PREDICTION_CHANNEL_ID, test_msg.id)
                 prediction_channel_ok = True
@@ -740,8 +895,7 @@ async def start_bot():
             logger.error(f"❌ Prédiction: {e}")
         
         logger.info(f"⚙️ OFFSET=+{prediction_offset}")
-        logger.info("🔁 Rattrapages: N+1, N+2, N+3 (3 max)")
-        logger.info("✅ Correction: Vérification stricte des numéros consécutifs")
+        logger.info("✅ Système opérationnel")
         return True
         
     except Exception as e:
@@ -779,6 +933,14 @@ async def main():
             logger.info(f"🔄 Redémarrage dans {restart_delay} secondes...")
             
         finally:
+            # Annuler le timer de redémarrage
+            if restart_task and not restart_task.done():
+                restart_task.cancel()
+                try:
+                    await restart_task
+                except asyncio.CancelledError:
+                    pass
+            
             try:
                 await client.disconnect()
             except:
