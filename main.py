@@ -1,6 +1,6 @@
 """
-Bot Telegram de prédiction Baccarat - Version 4.1
-Prédiction manuelle : le bot s'arrête après chaque finalisation
+Bot Telegram de prédiction Baccarat - Version 4.2 AUTOMATIQUE
+Prédiction automatique : le bot continue après chaque finalisation
 """
 import os
 import asyncio
@@ -59,7 +59,12 @@ prediction_channel_ok = False
 
 # ============ VARIABLES GLOBALES ============
 transfer_enabled = True
-auto_continue = False  # NOUVEAU: Désactivé par défaut - pas de continuation auto
+auto_continue = True  # ACTIVÉ: Mode automatique activé
+
+# ============ VARIABLES POUR MODE AUTO ============
+last_prediction_suit = None  # Mémorise la dernière couleur prédite
+last_base_game = 0          # Mémorise le dernier jeu de base
+auto_prediction_pending = False  # Indique si une prédiction auto est en attente
 
 def has_active_unresolved_predictions() -> bool:
     """
@@ -218,10 +223,21 @@ async def update_prediction_status(game_number: int, new_status: str, result_gro
 
         if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '✅3️⃣', '❌']:
             if game_number in pending_predictions:
+                # Sauvegarder les infos avant suppression
+                resolved_suit = pred['suit']
+                resolved_base = pred['base_game']
+                
                 del pending_predictions[game_number]
                 logger.info(f"Prédiction #{game_number} terminée et supprimée")
                 logger.info(f"📋 Prédictions restantes: {len(pending_predictions)}")
-                logger.info(f"⏹️ BOT EN ATTENTE: Aucune prédiction active - utilisez /predict pour manuel ou attendez message source")
+                
+                # MODE AUTO: Préparer la prochaine prédiction
+                if auto_continue:
+                    global last_prediction_suit, last_base_game, auto_prediction_pending
+                    last_prediction_suit = resolved_suit
+                    last_base_game = resolved_base
+                    auto_prediction_pending = True
+                    logger.info(f"🔄 MODE AUTO: Prédiction terminée, prochaine sera créée automatiquement")
 
         return True
 
@@ -234,8 +250,9 @@ async def update_prediction_status(game_number: int, new_status: str, result_gro
 async def check_prediction_result(game_number: int, first_group: str):
     """
     Vérifie si une prédiction est gagnée ou perdue.
-    SUPPRESSION de la continuation automatique - le bot s'arrête après chaque résultat.
+    MODE AUTO: Continue automatiquement après chaque résultat.
     """
+    global auto_prediction_pending
     try:
         normalized_group = normalize_suits(first_group)
         
@@ -278,9 +295,7 @@ async def check_prediction_result(game_number: int, first_group: str):
                     
                     await update_prediction_status(pred_game, new_status, first_group)
                     logger.info(f"  🎉 PRÉDICTION #{pred_game} GAGNÉE! {suit_count}x {target_suit} trouvé | Statut: {new_status}")
-                    logger.info(f"  ⏹️ ARRÊT: Le bot attend la prochaine instruction (pas de continuation auto)")
-                    
-                    # SUPPRESSION: Pas de création automatique après victoire
+                    logger.info(f"  🔄 MODE AUTO: Préparation de la prochaine prédiction...")
                     
                 else:
                     # PAS trouvé, passer à l'étape suivante
@@ -296,9 +311,7 @@ async def check_prediction_result(game_number: int, first_group: str):
                         # Échec définitif
                         await update_prediction_status(pred_game, '❌', first_group)
                         logger.info(f"  💔 PRÉDICTION #{pred_game} PERDUE après 3 rattrapages")
-                        logger.info(f"  ⏹️ ARRÊT: Le bot attend la prochaine instruction (pas de continuation auto)")
-                        
-                        # SUPPRESSION: Pas de création automatique après défaite
+                        logger.info(f"  🔄 MODE AUTO: Préparation de la prochaine prédiction malgré la défaite...")
                     else:
                         # Passer au rattrapage suivant
                         rattrapage_txt = {1: '1er', 2: '2ème', 3: '3ème'}.get(new_check_count, f'{new_check_count}ème')
@@ -342,13 +355,67 @@ async def create_prediction(target_game: int, suit: str, base_game: int, is_back
         logger.error(traceback.format_exc())
         return False
 
+async def try_create_auto_prediction(current_game: int):
+    """
+    Tente de créer une prédiction automatique après une finalisation.
+    Utilise la couleur du dernier message source disponible.
+    """
+    global auto_prediction_pending, last_prediction_suit
+    
+    if not auto_continue:
+        return False
+    
+    if not auto_prediction_pending:
+        return False
+    
+    if has_active_unresolved_predictions():
+        logger.info("   ⏸️ AUTO: Impossible de créer - une prédiction est déjà active")
+        return False
+    
+    # Chercher la couleur dans les jeux récents
+    target_game = current_game + prediction_offset
+    
+    # Essayer de récupérer la couleur du jeu actuel ou récent
+    suit_to_use = None
+    base_game_to_use = current_game
+    
+    # D'abord essayer le jeu actuel
+    if current_game in recent_games:
+        first_group = recent_games[current_game]['first_group']
+        suit_to_use = extract_first_card_suit(first_group)
+    
+    # Sinon prendre la dernière couleur mémorisée ou chercher dans l'historique
+    if not suit_to_use and last_prediction_suit:
+        # Utiliser la même couleur que la dernière prédiction
+        suit_to_use = last_prediction_suit
+        logger.info(f"   🔄 AUTO: Réutilisation de la dernière couleur {suit_to_use}")
+    
+    # Chercher dans les jeux récents si toujours pas de couleur
+    if not suit_to_use:
+        for game_num in sorted(recent_games.keys(), reverse=True):
+            first_group = recent_games[game_num]['first_group']
+            suit_to_use = extract_first_card_suit(first_group)
+            if suit_to_use:
+                base_game_to_use = game_num
+                break
+    
+    if suit_to_use and target_game not in pending_predictions:
+        success = await create_prediction(target_game, suit_to_use, base_game_to_use, is_continuation=True)
+        if success:
+            logger.info(f"   ✅ AUTO-PRÉDICTION CRÉÉE: #{target_game} - {suit_to_use} (basé sur #{base_game_to_use})")
+            auto_prediction_pending = False
+            return True
+        else:
+            logger.warning(f"   ⚠️ AUTO: Échec création prédiction #{target_game}")
+    
+    return False
+
 async def process_new_message(message_text: str, chat_id: int, is_finalized: bool = False):
     """
     Traite un nouveau message du canal source.
-    - CRÉE les prédictions UNIQUEMENT si aucune n'est active ET si c'est un nouveau message (pas une finalisation)
-    - VÉRIFIE et FINALISE les résultats UNIQUEMENT si finalisé
+    MODE AUTO: Crée automatiquement les prédictions en chaîne.
     """
-    global current_game_number, last_transferred_game
+    global current_game_number, last_transferred_game, auto_prediction_pending
     
     try:
         game_number = extract_game_number(message_text)
@@ -379,9 +446,18 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
         logger.info(f"   Premier groupe: ({first_group})")
         logger.info(f"   🔍 Prédictions actives non résolues: {get_active_prediction_count()}")
         
-        # ========== CRÉATION DE PRÉDICTION (UNIQUEMENT SI AUCUNE ACTIVE ET NON FINALISÉ) ==========
-        # IMPORTANT: On ne crée une prédiction que sur un message NON finalisé (nouveau jeu)
-        # et uniquement si aucune prédiction n'est déjà active
+        # Stocker pour usage futur (avant toute logique)
+        recent_games[game_number] = {
+            'first_group': first_group,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # ========== MODE AUTO: Création automatique si en attente ==========
+        if auto_continue and auto_prediction_pending and not is_finalized:
+            logger.info(f"   🔄 MODE AUTO: Tentative création automatique...")
+            await try_create_auto_prediction(game_number)
+        
+        # ========== CRÉATION DE PRÉDICTION (NOUVEAU JEU) ==========
         if not is_finalized:
             try:
                 if has_active_unresolved_predictions():
@@ -399,6 +475,7 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
                             if success:
                                 logger.info(f"   🎯 NOUVELLE PRÉDICTION: #{target_game} - {first_card_suit} (basé sur #{game_number})")
                                 logger.info(f"   ✅ Prédiction créée car aucune autre n'était en attente")
+                                auto_prediction_pending = False  # Réinitialiser
                             else:
                                 logger.warning(f"   ⚠️ Échec création prédiction #{target_game}")
                         elif target_game in pending_predictions:
@@ -411,9 +488,9 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
                 import traceback
                 logger.error(traceback.format_exc())
         else:
-            logger.info(f"   ⏭️ Message finalisé - pas de création de prédiction (attente de finalisation d'abord)")
+            logger.info(f"   ⏭️ Message finalisé - pas de création de prédiction depuis ce message")
         
-        # ========== VÉRIFICATION ET FINALISATION (UNIQUEMENT SI FINALISÉ) ==========
+        # ========== VÉRIFICATION ET FINALISATION ==========
         if is_finalized:
             finalized_hash = f"finalized_{game_number}"
             if finalized_hash not in processed_finalized:
@@ -433,6 +510,17 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
                 try:
                     logger.info(f"   ✅ MESSAGE FINALISÉ - Vérification du premier groupe...")
                     await check_prediction_result(game_number, first_group)
+                    
+                    # MODE AUTO: Attendre un peu puis créer la prochaine prédiction
+                    if auto_continue and auto_prediction_pending:
+                        logger.info(f"   ⏳ MODE AUTO: Attente de 2s avant création automatique...")
+                        await asyncio.sleep(2)
+                        
+                        # Utiliser le prochain numéro de jeu pour la prédiction
+                        next_game = game_number + 1
+                        if next_game in recent_games or game_number in recent_games:
+                            await try_create_auto_prediction(next_game)
+                        
                 except Exception as e:
                     logger.error(f"   ❌ Erreur vérification: {e}")
                     import traceback
@@ -441,23 +529,138 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
                 if len(processed_finalized) > 100:
                     processed_finalized.clear()
         
-        # Stocker le jeu pour référence
-        try:
-            recent_games[game_number] = {
-                'first_group': first_group,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            if len(recent_games) > 100:
-                oldest = min(recent_games.keys())
-                del recent_games[oldest]
-        except Exception as e:
-            logger.error(f"   ❌ Erreur stockage jeu: {e}")
+        # Nettoyage de l'historique
+        if len(recent_games) > 100:
+            oldest = min(recent_games.keys())
+            del recent_games[oldest]
             
     except Exception as e:
         logger.error(f"❌ Erreur globale process_new_message: {e}")
         import traceback
         logger.error(traceback.format_exc())
+
+# ==================== COMMANDES ADMIN ====================
+
+@client.on(events.NewMessage(pattern='/status'))
+async def status_command(event):
+    """Commande pour voir le statut du bot"""
+    try:
+        if event.sender_id != ADMIN_ID:
+            return
+        
+        status_msg = f"""📊 **STATUT DU BOT**
+
+🤖 Mode: {'🟢 AUTOMATIQUE' if auto_continue else '🔴 MANUEL'}
+⏳ Prédictions actives: {get_active_prediction_count()}
+📋 Liste: {list(pending_predictions.keys())}
+🔄 Auto-pending: {auto_prediction_pending}
+🎯 Dernière couleur: {last_prediction_suit or 'Aucune'}
+📊 Jeux en mémoire: {len(recent_games)}"""
+        
+        await event.reply(status_msg)
+        logger.info(f"Commande /status exécutée par admin")
+    except Exception as e:
+        logger.error(f"Erreur commande status: {e}")
+
+@client.on(events.NewMessage(pattern='/auto_on'))
+async def auto_on_command(event):
+    """Active le mode automatique"""
+    global auto_continue
+    try:
+        if event.sender_id != ADMIN_ID:
+            return
+        
+        auto_continue = True
+        await event.reply("✅ **Mode AUTOMATIQUE activé**\n\nLe bot créera des prédictions en chaîne automatiquement.")
+        logger.info("Mode auto activé par admin")
+    except Exception as e:
+        logger.error(f"Erreur commande auto_on: {e}")
+
+@client.on(events.NewMessage(pattern='/auto_off'))
+async def auto_off_command(event):
+    """Désactive le mode automatique"""
+    global auto_continue, auto_prediction_pending
+    try:
+        if event.sender_id != ADMIN_ID:
+            return
+        
+        auto_continue = False
+        auto_prediction_pending = False
+        await event.reply("🔴 **Mode MANUEL activé**\n\nLe bot s'arrêtera après chaque prédiction.")
+        logger.info("Mode auto désactivé par admin")
+    except Exception as e:
+        logger.error(f"Erreur commande auto_off: {e}")
+
+@client.on(events.NewMessage(pattern='/predict'))
+async def predict_command(event):
+    """Commande manuelle pour forcer une prédiction"""
+    try:
+        if event.sender_id != ADMIN_ID:
+            return
+        
+        # Extraire le numéro de jeu et la couleur si fournis
+        # Format: /predict 123 ♥ ou juste /predict
+        args = event.message.text.split()
+        
+        if len(args) >= 3:
+            # Format: /predict <game_number> <suit>
+            try:
+                target_game = int(args[1])
+                suit = args[2]
+                if suit not in ALL_SUITS and suit not in SUIT_DISPLAY.values():
+                    await event.reply(f"❌ Couleur invalide. Utilisez: ♥ ♠ ♦ ♣")
+                    return
+                
+                success = await create_prediction(target_game, suit, current_game_number)
+                if success:
+                    await event.reply(f"✅ Prédiction manuelle créée: #{target_game} - {suit}")
+                else:
+                    await event.reply("❌ Impossible de créer la prédiction (déjà active ou existe déjà)")
+            except ValueError:
+                await event.reply("❌ Format invalide. Utilisez: /predict <numéro> <couleur>")
+        else:
+            # Création automatique basée sur le dernier jeu
+            if has_active_unresolved_predictions():
+                await event.reply("❌ Une prédiction est déjà active. Attendez la finalisation.")
+                return
+            
+            if current_game_number == 0:
+                await event.reply("❌ Aucun jeu reçu encore. Attendez un message source.")
+                return
+            
+            target_game = current_game_number + prediction_offset
+            if current_game_number in recent_games:
+                first_group = recent_games[current_game_number]['first_group']
+                suit = extract_first_card_suit(first_group)
+                if suit:
+                    success = await create_prediction(target_game, suit, current_game_number)
+                    if success:
+                        await event.reply(f"✅ Prédiction créée: #{target_game} - {suit}")
+                    else:
+                        await event.reply("❌ Échec création prédiction")
+                else:
+                    await event.reply("❌ Impossible d'extraire la couleur du dernier jeu")
+            else:
+                await event.reply("❌ Données du dernier jeu non disponibles")
+                
+    except Exception as e:
+        logger.error(f"Erreur commande predict: {e}")
+        await event.reply(f"❌ Erreur: {str(e)}")
+
+@client.on(events.NewMessage(pattern='/reset'))
+async def reset_command(event):
+    """Reset toutes les prédictions"""
+    global pending_predictions, auto_prediction_pending
+    try:
+        if event.sender_id != ADMIN_ID:
+            return
+        
+        pending_predictions.clear()
+        auto_prediction_pending = False
+        await event.reply("🗑️ **Toutes les prédictions ont été reset.**\n\nLe bot est prêt pour une nouvelle série.")
+        logger.info("Reset des prédictions par admin")
+    except Exception as e:
+        logger.error(f"Erreur commande reset: {e}")
 
 # ==================== EVENT HANDLERS ====================
 
@@ -483,439 +686,64 @@ async def handle_message(event):
         import traceback
         logger.error(traceback.format_exc())
 
-@client.on(events.MessageEdited())
-async def handle_edited_message(event):
-    """Gère les messages édités (finalisation)"""
-    try:
-        chat = await event.get_chat()
-        chat_id = chat.id if hasattr(chat, 'id') else event.chat_id
-        
-        if chat_id > 0 and hasattr(chat, 'broadcast') and chat.broadcast:
-            chat_id = -1000000000000 - chat_id
-        
-        if chat_id == SOURCE_CHANNEL_ID:
-            message_text = event.message.message
-            logger.info(f"✏️ Message édité: {message_text[:80]}...")
-            
-            is_finalized = is_message_finalized(message_text)
-            
-            if is_finalized:
-                logger.info(f"✅ Finalisé - Vérification")
-                await process_new_message(message_text, chat_id, is_finalized=True)
-            else:
-                logger.info(f"⏳ Pas encore finalisé")
-            
-    except Exception as e:
-        logger.error(f"Erreur handle_edited_message: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+# ==================== SERVEUR WEB (Keep Alive) ====================
 
-# ==================== COMMANDES ADMIN ====================
-
-@client.on(events.NewMessage(pattern='/start'))
-async def cmd_start(event):
-    if event.is_group or event.is_channel:
-        return
-    
-    try:
-        await event.respond("""🤖 **Bot de Prédiction Baccarat - v4.1**
-
-📡 PRÉDICTION #N
-🎯 Couleur: [suit] [nom]
-🌪️ Statut: ⏳ EN COURS
-
-**NOUVEAUTÉ v4.1 - Prédiction Manuelle:**
-• Une seule prédiction active à la fois
-• Le bot s'ARRÊTE après chaque finalisation
-• Utilisez `/predict` pour forcer une nouvelle prédiction
-• Ou attendez un nouveau message du canal source
-
-**Condition de victoire: AU MOINS 1 carte dans le premier groupe**
-
-**Système de rattrapage:**
-• ✅0️⃣ = Gagné au numéro prédit (N)
-• ✅1️⃣ = Gagné au 1er rattrapage (N+1)
-• ✅2️⃣ = Gagné au 2ème rattrapage (N+2)
-• ✅3️⃣ = Gagné au 3ème rattrapage (N+3)
-• ❌ = Perdu (après 3 rattrapages)
-
-**Commandes:**
-• `/predict` - Forcer une nouvelle prédiction manuelle
-• `/status` - Voir les prédictions
-• `/setoffset <n>` - Changer le décalage
-• `/help` - Aide détaillée""")
-    except Exception as e:
-        logger.error(f"Erreur cmd_start: {e}")
-
-@client.on(events.NewMessage(pattern='/predict'))
-async def cmd_predict(event):
-    """Commande manuelle pour forcer une prédiction"""
-    if event.is_group or event.is_channel:
-        return
-    
-    try:
-        if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
-            await event.respond("⛔ Réservé admin")
-            return
-        
-        # Vérifier si une prédiction est déjà active
-        if has_active_unresolved_predictions():
-            active_games = [g for g, p in pending_predictions.items() if not p.get('resolved', False)]
-            await event.respond(f"⛔ Impossible: prédiction(s) active(s) en cours: {active_games}\nAttendez la finalisation ou utilisez /forceclear")
-            return
-        
-        # Créer une prédiction basée sur le dernier jeu connu
-        if current_game_number == 0:
-            await event.respond("❌ Aucun jeu connu. Attendez un message du canal source d'abord.")
-            return
-        
-        # Récupérer le dernier groupe connu
-        last_game = recent_games.get(current_game_number, {})
-        first_group = last_game.get('first_group', '')
-        
-        if not first_group:
-            await event.respond(f"❌ Pas d'information sur le jeu #{current_game_number}. Attendez un message.")
-            return
-        
-        first_card_suit = extract_first_card_suit(first_group)
-        if not first_card_suit:
-            await event.respond(f"❌ Impossible d'extraire la couleur du dernier groupe: ({first_group})")
-            return
-        
-        target_game = current_game_number + prediction_offset
-        
-        if target_game in pending_predictions:
-            await event.respond(f"⛔ Prédiction #{target_game} existe déjà")
-            return
-        
-        success = await create_prediction(target_game, first_card_suit, current_game_number)
-        if success:
-            await event.respond(f"""✅ **PRÉDICTION MANUELLE CRÉÉE**
-
-📡 PRÉDICTION #{target_game}
-🎯 Couleur: {first_card_suit} {get_suit_full_name(first_card_suit)}
-🌪️ Statut: ⏳ EN COURS
-
-Basé sur le jeu #{current_game_number}""")
-        else:
-            await event.respond("❌ Échec création prédiction. Vérifiez les logs.")
-            
-    except Exception as e:
-        logger.error(f"Erreur cmd_predict: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        await event.respond(f"❌ Erreur: {str(e)}")
-
-@client.on(events.NewMessage(pattern='/forceclear'))
-async def cmd_forceclear(event):
-    """Force la suppression de toutes les prédictions (en cas de blocage)"""
-    if event.is_group or event.is_channel:
-        return
-    
-    try:
-        if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
-            await event.respond("⛔ Réservé admin")
-            return
-        
-        global pending_predictions
-        count = len(pending_predictions)
-        pending_predictions.clear()
-        await event.respond(f"🧹 **FORCÉ:** {count} prédiction(s) supprimée(s). Le bot peut maintenant créer une nouvelle prédiction.")
-        
-    except Exception as e:
-        logger.error(f"Erreur forceclear: {e}")
-        await event.respond("❌ Erreur")
-
-@client.on(events.NewMessage(pattern='/setoffset'))
-async def cmd_setoffset(event):
-    if event.is_group or event.is_channel:
-        return
-    
-    try:
-        if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
-            await event.respond("⛔ Réservé admin")
-            return
-        
-        global prediction_offset
-        
-        text = event.message.message
-        parts = text.split()
-        
-        if len(parts) < 2:
-            await event.respond(f"Usage: `/setoffset <n>`\nActuel: **{prediction_offset}**")
-            return
-        
-        new_offset = int(parts[1])
-        
-        if new_offset < 1 or new_offset > 50:
-            await event.respond("Décalage: 1-50")
-            return
-        
-        prediction_offset = new_offset
-        await event.respond(f"✅ Décalage: **+{prediction_offset}**")
-        
-    except ValueError:
-        await event.respond("Entrez un nombre valide")
-    except Exception as e:
-        logger.error(f"Erreur setoffset: {e}")
-        await event.respond(f"❌ Erreur")
-
-@client.on(events.NewMessage(pattern='/status'))
-async def cmd_status(event):
-    if event.is_group or event.is_channel:
-        return
-    
-    try:
-        if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
-            await event.respond("⛔ Réservé admin")
-            return
-        
-        active_count = get_active_prediction_count()
-        
-        status_msg = f"📊 **État v4.1:**\n\n"
-        status_msg += f"🎮 Dernier jeu: #{current_game_number}\n"
-        status_msg += f"📏 Décalage: +{prediction_offset}\n"
-        status_msg += f"🎯 Condition: ≥1 carte dans 1er groupe\n"
-        status_msg += f"🔁 Rattrapages: 3 maximum (N+1, N+2, N+3)\n"
-        status_msg += f"🔒 Mode: Manuel (arrêt après chaque résultat)\n\n"
-        
-        if pending_predictions:
-            status_msg += f"**🔮 Active ({active_count}):**\n"
-            for game_num, pred in sorted(pending_predictions.items()):
-                try:
-                    suit_name = get_suit_full_name(pred['suit'])
-                    etape = pred.get('check_count', 0)
-                    if etape == 0:
-                        etape_txt = "N (prédit)"
-                    elif etape == 1:
-                        etape_txt = "1er rattrapage (N+1)"
-                    elif etape == 2:
-                        etape_txt = "2ème rattrapage (N+2)"
-                    elif etape == 3:
-                        etape_txt = "3ème rattrapage (N+3)"
-                    else:
-                        etape_txt = f"Étape {etape}"
-                    resolved = "✓ Résolue" if pred.get('resolved', False) else "⏳ EN COURS"
-                    status_msg += f"• #{game_num}: {pred['suit']} {suit_name}\n  → {etape_txt} | {resolved}\n"
-                except Exception as e:
-                    status_msg += f"• #{game_num}: Erreur affichage\n"
-        else:
-            status_msg += "**🔮 Aucune prédiction active**\n"
-            status_msg += "✅ Prêt pour nouvelle prédiction\n"
-            status_msg += "💡 Utilisez `/predict` pour manuel ou attendez message source\n"
-        
-        await event.respond(status_msg)
-    except Exception as e:
-        logger.error(f"Erreur status: {e}")
-        await event.respond("❌ Erreur affichage status")
-
-@client.on(events.NewMessage(pattern='/help'))
-async def cmd_help(event):
-    if event.is_group or event.is_channel:
-        return
-    
-    try:
-        await event.respond(f"""📖 **Aide v4.1 - Mode Manuel**
-
-**Format:**
-📡 PRÉDICTION #N
-🎯 Couleur: [suit] [nom]
-🌪️ Statut: [statut]
-
-**Fonctionnement v4.1:**
-1. Le bot crée UNE SEULE prédiction à la fois
-2. Il attend que cette prédiction soit finalisée (✅ ou ❌)
-3. **S'ARRÊTE** - ne crée pas de nouvelle prédiction automatiquement
-4. Pour continuer:
-   • `/predict` - Crée manuellement une prédiction sur le dernier jeu connu
-   • Ou attendez un nouveau message non finalisé du canal source
-
-**Déroulement:**
-• Prédiction créée pour le jeu #N
-• Attente de la finalisation de #N dans le canal source
-• Vérification: ≥1 carte de la couleur prédite ?
-• Si OUI → ✅X et **ARRÊT**
-• Si NON → rattrapage sur #N+1, #N+2, #N+3
-• Si toujours NON après 3 rattrapages → ❌ et **ARRÊT**
-
-**Commandes spéciales:**
-• `/predict` - Force une prédiction manuelle
-• `/forceclear` - Supprime toutes les prédictions (si bloqué)
-• `/status` - Voir l'état actuel
-
-**Décalage actuel:** +{prediction_offset}""")
-    except Exception as e:
-        logger.error(f"Erreur help: {e}")
-
-# ==================== TRANSFERT COMMANDS ====================
-
-@client.on(events.NewMessage(pattern='/transfert'))
-async def cmd_transfert(event):
-    if event.is_group or event.is_channel:
-        return
-    try:
-        global transfer_enabled
-        transfer_enabled = True
-        await event.respond("✅ Transfert ON")
-    except Exception as e:
-        logger.error(f"Erreur transfert: {e}")
-
-@client.on(events.NewMessage(pattern='/stoptransfert'))
-async def cmd_stop_transfert(event):
-    if event.is_group or event.is_channel:
-        return
-    try:
-        global transfer_enabled
-        transfer_enabled = False
-        await event.respond("⛔ Transfert OFF")
-    except Exception as e:
-        logger.error(f"Erreur stop transfert: {e}")
-
-# ==================== WEB SERVER ====================
-
-async def index(request):
-    try:
-        active_count = get_active_prediction_count()
-        html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Bot Baccarat v4.1</title>
-            <meta charset="utf-8">
-            <style>
-                body {{ font-family: Arial; margin: 40px; background: #1a1a2e; color: #eee; }}
-                h1 {{ color: #00d4ff; }}
-                .status {{ background: #16213e; padding: 20px; border-radius: 10px; margin: 20px 0; }}
-                .feature {{ color: #00ff88; font-weight: bold; }}
-                .warning {{ color: #ff4444; font-weight: bold; }}
-            </style>
-        </head>
-        <body>
-            <h1>📡 Bot Baccarat v4.1</h1>
-            <div class="status">
-                <div><strong>Dernier jeu:</strong> #{current_game_number}</div>
-                <div><strong>Décalage:</strong> +{prediction_offset}</div>
-                <div><strong>Actives:</strong> {active_count}</div>
-                <div><strong>Règle:</strong> ≥1 carte, 3 rattrapages max</div>
-                <div class="warning">⏹️ MODE MANUEL: Arrêt après chaque résultat</div>
-                <div class="feature">💡 Utilisez /predict pour continuer</div>
-            </div>
-        </body>
-        </html>
-        """
-        return web.Response(text=html, content_type='text/html', status=200)
-    except Exception as e:
-        logger.error(f"Erreur index: {e}")
-        return web.Response(text="Error", status=500)
-
-async def health_check(request):
-    return web.Response(text="OK", status=200)
+async def handle_health(request):
+    return web.Response(text="Bot Baccarat Auto v4.2 is running!")
 
 async def start_web_server():
-    try:
-        app = web.Application()
-        app.router.add_get('/', index)
-        app.router.add_get('/health', health_check)
-        
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', PORT)
-        await site.start()
-        logger.info(f"Web server: 0.0.0.0:{PORT}")
-    except Exception as e:
-        logger.error(f"Erreur web server: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    app = web.Application()
+    app.router.add_get('/', handle_health)
+    app.router.add_get('/health', handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"🌐 Serveur web démarré sur le port {PORT}")
 
-async def start_bot():
-    global source_channel_ok, prediction_channel_ok
-    try:
-        logger.info("🚀 Démarrage v4.1...")
-        logger.info("🎯 Condition: ≥1 carte dans le premier groupe")
-        logger.info("🔒 MODE MANUEL: Une seule prédiction, arrêt après résultat")
-        logger.info("⏹️ PAS DE CONTINUATION AUTOMATIQUE")
-        await client.start(bot_token=BOT_TOKEN)
-        logger.info("✅ Bot connecté")
-        
-        me = await client.get_me()
-        logger.info(f"Bot: @{getattr(me, 'username', 'Unknown')}")
-        
-        try:
-            source_entity = await client.get_entity(SOURCE_CHANNEL_ID)
-            source_channel_ok = True
-            logger.info(f"✅ Source: {getattr(source_entity, 'title', 'N/A')}")
-        except Exception as e:
-            logger.error(f"❌ Source: {e}")
-        
-        try:
-            pred_entity = await client.get_entity(PREDICTION_CHANNEL_ID)
-            try:
-                test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🤖 v4.1 connecté! Mode manuel - Le bot s'arrête après chaque résultat. Utilisez /predict pour continuer.")
-                await asyncio.sleep(1)
-                await client.delete_messages(PREDICTION_CHANNEL_ID, test_msg.id)
-                prediction_channel_ok = True
-                logger.info(f"✅ Prédiction: {getattr(pred_entity, 'title', 'N/A')}")
-            except Exception as e:
-                logger.warning(f"⚠️ Prédiction lecture seule: {e}")
-        except Exception as e:
-            logger.error(f"❌ Prédiction: {e}")
-        
-        logger.info(f"⚙️ OFFSET=+{prediction_offset}")
-        logger.info("🔁 Rattrapages: N+1, N+2, N+3 (3 max)")
-        logger.info("⏹️ ARRÊT: Pas de création auto après résultat")
-        logger.info("💡 COMMANDE: /predict pour manuel")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Erreur start_bot: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return False
+# ==================== DÉMARRAGE ====================
 
 async def main():
-    """Boucle principale avec reconnexion automatique"""
-    restart_delay = 10
+    global source_channel_ok, prediction_channel_ok
     
-    while True:
-        try:
-            await start_web_server()
-            success = await start_bot()
-            
-            if not success:
-                logger.error(f"Échec démarrage, nouvelle tentative dans {restart_delay}s...")
-                await asyncio.sleep(restart_delay)
-                continue
-            
-            logger.info("🤖 Bot opérationnel! En attente de messages...")
-            await client.run_until_disconnected()
-            logger.warning("⚠️ Client déconnecté, reconnexion...")
-            
-        except KeyboardInterrupt:
-            logger.info("🛑 Arrêt demandé par l'utilisateur")
-            break
-            
-        except Exception as e:
-            logger.error(f"💥 Erreur fatale: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            logger.info(f"🔄 Redémarrage dans {restart_delay} secondes...")
-            
-        finally:
-            try:
-                await client.disconnect()
-            except:
-                pass
-                
-        await asyncio.sleep(restart_delay)
+    logger.info("🚀 Démarrage du Bot Baccarat v4.2 (Mode Automatique)...")
     
-    logger.info("👋 Bot arrêté définitivement")
+    # Démarrer le serveur web
+    await start_web_server()
+    
+    # Connexion Telegram
+    await client.start(bot_token=BOT_TOKEN)
+    logger.info("✅ Client Telegram connecté")
+    
+    # Vérifier les canaux
+    try:
+        if SOURCE_CHANNEL_ID:
+            await client.get_entity(SOURCE_CHANNEL_ID)
+            source_channel_ok = True
+            logger.info(f"✅ Canal source accessible: {SOURCE_CHANNEL_ID}")
+    except Exception as e:
+        logger.error(f"❌ Canal source inaccessible: {e}")
+    
+    try:
+        if PREDICTION_CHANNEL_ID and PREDICTION_CHANNEL_ID != 0:
+            await client.get_entity(PREDICTION_CHANNEL_ID)
+            prediction_channel_ok = True
+            logger.info(f"✅ Canal de prédiction accessible: {PREDICTION_CHANNEL_ID}")
+    except Exception as e:
+        logger.warning(f"⚠️ Canal de prédiction inaccessible: {e}")
+    
+    logger.info("🤖 Bot prêt et en écoute (Mode: AUTOMATIQUE)")
+    logger.info("Commandes disponibles: /status /auto_on /auto_off /predict /reset")
+    
+    # Garder le bot en vie
+    await client.run_until_disconnected()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Arrêt")
+        logger.info("🛑 Arrêt du bot demandé par l'utilisateur")
     except Exception as e:
-        logger.error(f"Fatal: {e}")
+        logger.error(f"❌ Erreur fatale: {e}")
         import traceback
         logger.error(traceback.format_exc())
