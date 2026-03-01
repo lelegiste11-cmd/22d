@@ -8,15 +8,15 @@ services:
     startCommand: python main.py
     envVars:
       - key: PORT
-        value: "10000"
+        value: 10000
       - key: API_ID
         value: "29177661"
       - key: API_HASH
-        value: "a8639172fa8d35dbfd8ea46286d349ab"
+        value: a8639172fa8d35dbfd8ea46286d349ab
       - key: BOT_TOKEN
-        value: "8458163781:AAFj5fth5J-nRjHHd0-hlxkX3r0_ClNtlwQ"
+        value: 8458163781:AAEtBcYICeVg_m3XAEQUnSwEX3G_06DA-YI
       - key: ADMIN_ID
-        value: "6180384006"
+        value: "1190237801"
       - key: SOURCE_CHANNEL_ID
         value: "-1002682552255"
       - key: PREDICTION_CHANNEL_ID
