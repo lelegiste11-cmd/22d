@@ -49,8 +49,12 @@ def extract_game_number(message: str):
         return int(match.group(1))
     return None
 
-def extract_parentheses_groups(message: str):
-    return re.findall(r"\(([^)]*)\)", message)
+def extract_first_parenthesis_group(message: str) -> str:
+    """Extrait UNIQUEMENT la première parenthèse du message"""
+    match = re.search(r"\(([^)]*)\)", message)
+    if match:
+        return match.group(1)
+    return ""
 
 def normalize_suits(text: str) -> str:
     normalized = text.replace('❤️', '♥').replace('❤', '♥').replace('♥️', '♥')
@@ -72,7 +76,6 @@ def get_first_card_suit(first_group: str) -> str:
 def get_first_card_suit_from_group(group_str: str) -> str:
     """Extrait UNIQUEMENT la couleur de la première carte du groupe (pour vérification)"""
     normalized = normalize_suits(group_str)
-    # Cherche uniquement la première carte (premier pattern valeur+couleur)
     match = re.search(r"[0-9AJQKajqk]+\s*([♠♥♦♣])", normalized)
     if match:
         suit = match.group(1)
@@ -174,8 +177,8 @@ async def update_prediction_status(target_game: int, new_status: str, check_coun
         logger.error(f"Erreur mise à jour prédiction: {e}")
         return False
 
-async def check_prediction_result(game_number: int, first_group: str):
-    """Vérifie le résultat en comparant UNIQUEMENT la première carte du premier groupe"""
+async def check_prediction_result(game_number: int, message_text: str):
+    """Vérifie le résultat UNIQUEMENT dans la première parenthèse du message"""
     global active_prediction
     
     if not active_prediction:
@@ -184,11 +187,19 @@ async def check_prediction_result(game_number: int, first_group: str):
     target_game = active_prediction['target_game']
     target_suit = active_prediction['suit']
     
-    # Extraire UNIQUEMENT la première carte du groupe pour vérification
-    first_card_suit = get_first_card_suit_from_group(first_group)
+    # Extraire UNIQUEMENT la première parenthèse pour vérification
+    first_parenthesis = extract_first_parenthesis_group(message_text)
+    if not first_parenthesis:
+        logger.warning(f"⚠️ Jeu #{game_number}: aucune parenthèse trouvée pour vérification")
+        return None
+    
+    # Extraire UNIQUEMENT la première carte de la première parenthèse
+    first_card_suit = get_first_card_suit_from_group(first_parenthesis)
+    
+    logger.info(f"🔍 Vérification Jeu #{game_number}: première parenthèse='{first_parenthesis}', première carte={first_card_suit}, cible={target_suit}")
     
     if game_number == target_game:
-        # Comparer uniquement la première carte, pas toutes les cartes du groupe
+        # Comparer uniquement la première carte de la première parenthèse
         if first_card_suit == target_suit:
             await update_prediction_status(target_game, 'success', 0)
             logger.info(f"🎉 Prédiction #{target_game} réussie! Première carte: {first_card_suit}")
@@ -235,22 +246,23 @@ async def process_message(message_text: str, chat_id: int, is_finalized: bool = 
         if len(processed_messages) > 200:
             processed_messages.clear()
 
-        groups = extract_parentheses_groups(message_text)
-        if len(groups) < 1:
+        # Extraire la première parenthèse pour prédiction ET vérification
+        first_parenthesis = extract_first_parenthesis_group(message_text)
+        if not first_parenthesis:
+            logger.warning(f"⚠️ Jeu #{game_number}: aucune parenthèse trouvée")
             return
 
-        first_group = groups[0]
-        logger.info(f"Jeu #{game_number} reçu - Groupe1: {first_group}")
+        logger.info(f"Jeu #{game_number} reçu - Première parenthèse: {first_parenthesis}")
 
-        # VÉRIFICATION: uniquement sur messages finalisés, vérifie la première carte du premier groupe
+        # VÉRIFICATION: uniquement sur messages finalisés, vérifie dans la première parenthèse uniquement
         if waiting_for_finalization and is_finalized:
-            result = await check_prediction_result(game_number, first_group)
+            result = await check_prediction_result(game_number, message_text)
             if result is not None:
                 return
 
         # PRÉDICTION: envoi immédiat sans attendre finalisation
         if not waiting_for_finalization and active_prediction is None:
-            first_suit = get_first_card_suit(first_group)
+            first_suit = get_first_card_suit(first_parenthesis)
             
             if first_suit:
                 target_game = game_number + PREDICTION_OFFSET
@@ -263,7 +275,7 @@ async def process_message(message_text: str, chat_id: int, is_finalized: bool = 
                         del recent_games[oldest]
 
         recent_games[game_number] = {
-            'first_group': first_group,
+            'first_parenthesis': first_parenthesis,
             'timestamp': datetime.now().isoformat()
         }
 
