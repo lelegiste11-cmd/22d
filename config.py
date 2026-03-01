@@ -20,7 +20,7 @@ ADMIN_ID = int(os.getenv('ADMIN_ID') or '1190237801')
 # Credentials Telegram API
 API_ID = int(os.getenv('API_ID') or '29177661')
 API_HASH = os.getenv('API_HASH') or 'a8639172fa8d35dbfd8ea46286d349ab'
-BOT_TOKEN = os.getenv('BOT_TOKEN') or '8458163781:AAEtBcYICeVg_m3XAEQUnSwEX3G_06DA-YI'
+BOT_TOKEN = os.getenv('BOT_TOKEN') or '8458163781:AAG7n_qncj-XSlylwtKS--p9axDLsTO7r7M'
 
 # Port pour le serveur web (Render.com utilise 10000)
 PORT = int(os.getenv('PORT') or '10000')
