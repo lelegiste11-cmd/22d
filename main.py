@@ -58,6 +58,7 @@ def normalize_suits(text: str) -> str:
     return normalized
 
 def get_first_card_suit(first_group: str) -> str:
+    """Extrait la couleur de la première carte du premier groupe (pour prédiction)"""
     normalized = normalize_suits(first_group)
     match = re.search(r"[0-9AJQKajqk]+\s*([♠♥♦♣])", normalized)
     if match:
@@ -68,6 +69,16 @@ def get_first_card_suit(first_group: str) -> str:
             return SUIT_DISPLAY.get(suit, suit)
     return None
 
+def get_first_card_suit_from_group(group_str: str) -> str:
+    """Extrait UNIQUEMENT la couleur de la première carte du groupe (pour vérification)"""
+    normalized = normalize_suits(group_str)
+    # Cherche uniquement la première carte (premier pattern valeur+couleur)
+    match = re.search(r"[0-9AJQKajqk]+\s*([♠♥♦♣])", normalized)
+    if match:
+        suit = match.group(1)
+        return SUIT_DISPLAY.get(suit, suit)
+    return None
+
 def get_suit_full_name(suit: str) -> str:
     return SUIT_NAMES.get(suit, suit)
 
@@ -76,13 +87,6 @@ def is_message_finalized(message: str) -> bool:
         return False
     return '✅' in message or '🔰' in message
 
-def has_suit_in_group(group_str: str, target_suit: str) -> bool:
-    normalized = normalize_suits(group_str)
-    target_normalized = normalize_suits(target_suit)
-    for suit in ALL_SUITS:
-        if suit in target_normalized and suit in normalized:
-            return True
-    return False
 async def send_prediction(game_number: int, suit: str):
     global active_prediction, waiting_for_finalization
     
@@ -169,7 +173,9 @@ async def update_prediction_status(target_game: int, new_status: str, check_coun
     except Exception as e:
         logger.error(f"Erreur mise à jour prédiction: {e}")
         return False
+
 async def check_prediction_result(game_number: int, first_group: str):
+    """Vérifie le résultat en comparant UNIQUEMENT la première carte du premier groupe"""
     global active_prediction
     
     if not active_prediction:
@@ -178,22 +184,26 @@ async def check_prediction_result(game_number: int, first_group: str):
     target_game = active_prediction['target_game']
     target_suit = active_prediction['suit']
     
+    # Extraire UNIQUEMENT la première carte du groupe pour vérification
+    first_card_suit = get_first_card_suit_from_group(first_group)
+    
     if game_number == target_game:
-        if has_suit_in_group(first_group, target_suit):
+        # Comparer uniquement la première carte, pas toutes les cartes du groupe
+        if first_card_suit == target_suit:
             await update_prediction_status(target_game, 'success', 0)
-            logger.info(f"🎉 Prédiction #{target_game} réussie immédiatement!")
+            logger.info(f"🎉 Prédiction #{target_game} réussie! Première carte: {first_card_suit}")
             return True
         else:
             active_prediction['check_count'] = 1
-            logger.info(f"⏳ Prédiction #{target_game}: couleur non trouvée, attente jeu +1")
+            logger.info(f"⏳ Prédiction #{target_game}: première carte {first_card_suit} != {target_suit}, attente jeu +1")
             return False
     
     elif game_number > target_game and game_number <= target_game + 3:
         check_count = game_number - target_game
         
-        if has_suit_in_group(first_group, target_suit):
+        if first_card_suit == target_suit:
             await update_prediction_status(target_game, 'success', check_count)
-            logger.info(f"🎉 Prédiction #{target_game} réussie au jeu +{check_count}!")
+            logger.info(f"🎉 Prédiction #{target_game} réussie au jeu +{check_count}! Première carte: {first_card_suit}")
             return True
         else:
             active_prediction['check_count'] = check_count + 1
@@ -203,7 +213,7 @@ async def check_prediction_result(game_number: int, first_group: str):
                 logger.info(f"😞 Prédiction #{target_game} échouée après 4 vérifications")
                 return False
             else:
-                logger.info(f"⏳ Prédiction #{target_game}: pas trouvé, attente jeu +{check_count + 1}")
+                logger.info(f"⏳ Prédiction #{target_game}: première carte {first_card_suit} != {target_suit}, attente +{check_count + 1}")
                 return False
     
     return None
@@ -232,11 +242,13 @@ async def process_message(message_text: str, chat_id: int, is_finalized: bool = 
         first_group = groups[0]
         logger.info(f"Jeu #{game_number} reçu - Groupe1: {first_group}")
 
+        # VÉRIFICATION: uniquement sur messages finalisés, vérifie la première carte du premier groupe
         if waiting_for_finalization and is_finalized:
             result = await check_prediction_result(game_number, first_group)
             if result is not None:
                 return
 
+        # PRÉDICTION: envoi immédiat sans attendre finalisation
         if not waiting_for_finalization and active_prediction is None:
             first_suit = get_first_card_suit(first_group)
             
