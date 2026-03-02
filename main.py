@@ -142,6 +142,23 @@ async def reset_bot_state():
 async def send_prediction(game_number: int, suit: str):
     global active_prediction, waiting_for_finalization
     
+    # 🔧 CORRECTION: Logs de diagnostic détaillés
+    logger.info(f"🔍 TENTATIVE ENVOI PRÉDICTION:")
+    logger.info(f"   - Game: #{game_number}")
+    logger.info(f"   - Suit: {suit}")
+    logger.info(f"   - PREDICTION_CHANNEL_ID: {PREDICTION_CHANNEL_ID}")
+    logger.info(f"   - prediction_channel_ok: {prediction_channel_ok}")
+    logger.info(f"   - STATS_CHANNEL_ID: {STATS_CHANNEL_ID}")
+    
+    # 🔧 CORRECTION: Vérification explicite des conditions
+    if not PREDICTION_CHANNEL_ID or PREDICTION_CHANNEL_ID == 0:
+        logger.error("❌ ERREUR: PREDICTION_CHANNEL_ID non configuré")
+        return None
+    
+    # 🔧 CORRECTION: Forcer l'envoi même si prediction_channel_ok est False (tentative de recovery)
+    if not prediction_channel_ok:
+        logger.warning("⚠️ prediction_channel_ok est False, tentative d'envoi quand même...")
+    
     try:
         target_game = game_number + PREDICTION_OFFSET
         suit_name = get_suit_full_name(suit)
@@ -149,17 +166,29 @@ async def send_prediction(game_number: int, suit: str):
         prediction_msg = f"📡 PRÉDICTION #{target_game}\n🎯 Couleur: {suit} {suit_name}\n🌪️ Statut: ⏳ EN COURS"
 
         msg_id = 0
-        if PREDICTION_CHANNEL_ID and PREDICTION_CHANNEL_ID != 0 and prediction_channel_ok:
+        
+        # 🔧 CORRECTION: Try/catch spécifique pour l'envoi avec retry
+        try:
+            pred_msg = await client.send_message(PREDICTION_CHANNEL_ID, prediction_msg)
+            msg_id = pred_msg.id
+            logger.info(f"✅ Prédiction envoyée avec succès: Jeu #{target_game} - {suit} (Msg ID: {msg_id})")
+            # Si l'envoi réussit, on met à jour le flag
+            global prediction_channel_ok
+            prediction_channel_ok = True
+        except Exception as send_error:
+            logger.error(f"❌ ERREUR ENVOI PRÉDICTION: {send_error}")
+            logger.error(f"   Type: {type(send_error).__name__}")
+            # Tentative avec get_entity si l'ID pose problème
             try:
-                pred_msg = await client.send_message(PREDICTION_CHANNEL_ID, prediction_msg)
+                logger.info("🔄 Tentative avec get_entity...")
+                entity = await client.get_entity(PREDICTION_CHANNEL_ID)
+                pred_msg = await client.send_message(entity, prediction_msg)
                 msg_id = pred_msg.id
-                logger.info(f"✅ Prédiction envoyée: Jeu #{target_game} - {suit}")
-            except Exception as e:
-                logger.error(f"❌ Erreur envoi prédiction: {e}")
+                prediction_channel_ok = True
+                logger.info(f"✅ Prédiction envoyée via entity: Jeu #{target_game}")
+            except Exception as e2:
+                logger.error(f"❌ Échec tentative recovery: {e2}")
                 return None
-        else:
-            logger.warning("⚠️ Canal de prédiction non accessible")
-            return None
 
         active_prediction = {
             'source_game': game_number,
@@ -172,11 +201,13 @@ async def send_prediction(game_number: int, suit: str):
         }
         waiting_for_finalization = True
         
-        logger.info(f"🎯 Prédiction active: Jeu #{target_game} - {suit} (basé sur #{game_number})")
+        logger.info(f"🎯 Prédiction active créée: Jeu #{target_game} - {suit} (basé sur #{game_number})")
         return msg_id
 
     except Exception as e:
-        logger.error(f"Erreur envoi prédiction: {e}")
+        logger.error(f"❌ Erreur générale send_prediction: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 async def update_prediction_status(target_game: int, new_status: str, check_count: int = 0):
@@ -373,12 +404,22 @@ async def process_source_message(message_text: str, chat_id: int):
                     return
                 
                 if not recent_games.get(target_game, {}).get('predicted', False):
-                    await send_prediction(game_number, first_suit)
-                    recent_games[target_game] = {'predicted': True, 'suit': first_suit}
+                    # 🔧 CORRECTION: Log avant envoi
+                    logger.info(f"🚀 Appel send_prediction pour #{target_game} (suit: {first_suit})")
+                    result = await send_prediction(game_number, first_suit)
+                    if result:
+                        recent_games[target_game] = {'predicted': True, 'suit': first_suit}
+                        logger.info(f"✅ Prédiction enregistrée pour #{target_game}")
+                    else:
+                        logger.error(f"❌ Échec envoi prédiction pour #{target_game}")
                     
                     if len(recent_games) > 100:
                         oldest = min(recent_games.keys())
                         del recent_games[oldest]
+                else:
+                    logger.info(f"⏭️ Jeu #{target_game} déjà prédit, ignoré")
+            else:
+                logger.warning(f"⚠️ Jeu #{game_number}: couleur non trouvée dans '{first_parenthesis}'")
 
         recent_games[game_number] = {
             'first_parenthesis': first_parenthesis,
@@ -444,7 +485,8 @@ async def cmd_start(event):
     if event.is_group or event.is_channel:
         return
     stats_info = f"\n📊 Canal stats: {STATS_CHANNEL_ID}" if STATS_CHANNEL_ID else "\n⚠️ Canal stats: NON CONFIGURÉ"
-    await event.respond(f"🤖 **Bot de Prédiction Baccarat**{stats_info}\n\nCycle: #{cycle_count}\n\nCe bot prédit la couleur de la première carte.\n\n**Commandes:**\n• `/status` - Voir la prédiction en cours\n• `/setoffset <nombre>` - Changer l'offset\n• `/setstats <id>` - Configurer canal statistiques\n• `/debug` - Informations de débogage\n• `/reset` - Forcer redémarrage cycle")
+    status_channel = "✅ Connecté" if prediction_channel_ok else "❌ Non connecté"
+    await event.respond(f"🤖 **Bot de Prédiction Baccarat**{stats_info}\n\nCycle: #{cycle_count}\nCanal Prédiction: {status_channel}\n\nCe bot prédit la couleur de la première carte.\n\n**Commandes:**\n• `/status` - Voir la prédiction en cours\n• `/setoffset <nombre>` - Changer l'offset\n• `/setstats <id>` - Configurer canal statistiques\n• `/debug` - Informations de débogage\n• `/reset` - Forcer redémarrage cycle\n• `/testpred` - Tester envoi prédiction manuel")
 
 @client.on(events.NewMessage(pattern='/setstats'))
 async def cmd_setstats(event):
@@ -500,7 +542,8 @@ async def cmd_status(event):
         return
     
     stats_status = f"📊 Stats: {STATS_CHANNEL_ID}" if STATS_CHANNEL_ID else "⚠️ Stats: NON CONFIGURÉ"
-    status_msg = f"📊 **État (Cycle #{cycle_count}):**\n\n🎮 Jeu actuel: #{current_game_number}\n📏 Offset: +{PREDICTION_OFFSET}\n{stats_status}\n\n"
+    channel_status = "✅ Connecté" if prediction_channel_ok else "❌ NON CONNECTÉ"
+    status_msg = f"📊 **État (Cycle #{cycle_count}):**\n\n🎮 Jeu actuel: #{current_game_number}\n📏 Offset: +{PREDICTION_OFFSET}\n📡 Canal Prédiction: {channel_status}\n{stats_status}\n\n"
     
     if active_prediction:
         pred = active_prediction
@@ -531,6 +574,35 @@ async def cmd_reset(event):
     await reset_bot_state()
     await event.respond(f"✅ Cycle redémarré! Nouveau cycle: #{cycle_count}")
 
+@client.on(events.NewMessage(pattern='/testpred'))
+async def cmd_testpred(event):
+    """Commande pour tester l'envoi manuel d'une prédiction"""
+    global prediction_channel_ok
+    if event.is_group or event.is_channel:
+        return
+    if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
+        await event.respond("Commande réservée à l'administrateur")
+        return
+    
+    await event.respond("🧪 Test d'envoi de prédiction...")
+    
+    try:
+        # Test direct
+        test_msg = f"🧪 **TEST PRÉDICTION #{current_game_number + PREDICTION_OFFSET}**\n🎯 Couleur: ♠️ Pique\n🌪️ Statut: ⏳ TEST EN COURS"
+        
+        logger.info(f"Test envoi vers {PREDICTION_CHANNEL_ID}")
+        sent = await client.send_message(PREDICTION_CHANNEL_ID, test_msg)
+        
+        prediction_channel_ok = True
+        await event.respond(f"✅ Test réussi! Message ID: {sent.id}\nprediction_channel_ok forcé à True")
+        
+        # Suppression du message de test après 5 secondes
+        await asyncio.sleep(5)
+        await client.delete_messages(PREDICTION_CHANNEL_ID, sent.id)
+        
+    except Exception as e:
+        await event.respond(f"❌ Échec test: {str(e)}\nType: {type(e).__name__}")
+
 @client.on(events.NewMessage(pattern='/checkchannels'))
 async def cmd_checkchannels(event):
     global source_channel_ok, prediction_channel_ok
@@ -549,15 +621,30 @@ async def cmd_checkchannels(event):
         source_channel_ok = False
         result_msg += f"❌ **Source** ({SOURCE_CHANNEL_ID}): {str(e)[:100]}\n\n"
     
-    # Vérifier canal prédiction
+    # Vérifier canal prédiction - 🔧 CORRECTION: Test plus robuste
     try:
         pred_entity = await client.get_entity(PREDICTION_CHANNEL_ID)
         pred_title = getattr(pred_entity, 'title', 'N/A')
-        test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🔍 Test...")
-        await asyncio.sleep(1)
-        await client.delete_messages(PREDICTION_CHANNEL_ID, test_msg.id)
-        prediction_channel_ok = True
-        result_msg += f"✅ **Prédiction** ({PREDICTION_CHANNEL_ID}): {pred_title}\n\n"
+        
+        # Test d'envoi sans suppression obligatoire
+        try:
+            test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🔍 Test de connexion...")
+            prediction_channel_ok = True
+            result_msg += f"✅ **Prédiction** ({PREDICTION_CHANNEL_ID}): {pred_title}\n"
+            result_msg += f"   Message test envoyé (ID: {test_msg.id})\n\n"
+            
+            # Suppression optionnelle
+            try:
+                await asyncio.sleep(1)
+                await client.delete_messages(PREDICTION_CHANNEL_ID, test_msg.id)
+            except:
+                pass
+                
+        except Exception as send_err:
+            prediction_channel_ok = False
+            result_msg += f"⚠️ **Prédiction** ({PREDICTION_CHANNEL_ID}): {pred_title}\n"
+            result_msg += f"   ❌ Impossible d'envoyer: {str(send_err)[:100]}\n\n"
+            
     except Exception as e:
         prediction_channel_ok = False
         result_msg += f"❌ **Prédiction** ({PREDICTION_CHANNEL_ID}): {str(e)[:100]}\n\n"
@@ -584,10 +671,12 @@ async def index(request):
 <p>Statut: En ligne ✅</p>
 <p><strong>Cycle:</strong> #{cycle_count}</p>
 <p><strong>Jeu actuel:</strong> #{current_game_number}</p>
+<p><strong>Canal Prédiction:</strong> {'✅ Connecté' if prediction_channel_ok else '❌ Non connecté'}</p>
 <p><strong>Stats:</strong> {STATS_CHANNEL_ID if STATS_CHANNEL_ID else 'Non config'}</p>
 <ul>
 <li><a href="/health">Health Check</a></li>
 <li><a href="/status">Statut JSON</a></li>
+<li><a href="/test_send">Test Envoi Prédiction</a></li>
 </ul>
 </body>
 </html>"""
@@ -606,15 +695,50 @@ async def status_api(request):
         'current_game': current_game_number,
         'offset': PREDICTION_OFFSET,
         'active_prediction': active_prediction is not None,
+        'prediction_channel_ok': prediction_channel_ok,
         'timestamp': datetime.now().isoformat()
     }
     return web.json_response(status_data)
+
+async def test_send_api(request):
+    """Endpoint API pour tester l'envoi de prédiction"""
+    global prediction_channel_ok
+    try:
+        test_msg = f"🧪 Test API - Prédiction #{current_game_number + PREDICTION_OFFSET}"
+        sent = await client.send_message(PREDICTION_CHANNEL_ID, test_msg)
+        prediction_channel_ok = True
+        
+        # Suppression après 3 secondes
+        asyncio.create_task(delete_after(sent.id, 3))
+        
+        return web.json_response({
+            'success': True,
+            'message_id': sent.id,
+            'channel_id': PREDICTION_CHANNEL_ID,
+            'prediction_channel_ok': True
+        })
+    except Exception as e:
+        return web.json_response({
+            'success': False,
+            'error': str(e),
+            'channel_id': PREDICTION_CHANNEL_ID,
+            'prediction_channel_ok': prediction_channel_ok
+        })
+
+async def delete_after(message_id, seconds):
+    """Supprime un message après X secondes"""
+    await asyncio.sleep(seconds)
+    try:
+        await client.delete_messages(PREDICTION_CHANNEL_ID, message_id)
+    except:
+        pass
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', index)
     app.router.add_get('/health', health_check)
     app.router.add_get('/status', status_api)
+    app.router.add_get('/test_send', test_send_api)  # Nouvel endpoint
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
@@ -633,6 +757,7 @@ async def start_bot():
         username = getattr(me, 'username', 'Unknown')
         logger.info(f"Bot opérationnel: @{username}")
         
+        # Vérifier canal source
         try:
             source_entity = await client.get_entity(SOURCE_CHANNEL_ID)
             source_channel_ok = True
@@ -640,16 +765,33 @@ async def start_bot():
         except Exception as e:
             logger.error(f"❌ Canal source: {e}")
         
+        # 🔧 CORRECTION: Vérification canal prédiction plus robuste
         try:
             pred_entity = await client.get_entity(PREDICTION_CHANNEL_ID)
-            test_msg = await client.send_message(PREDICTION_CHANNEL_ID, f"🤖 Bot connecté! (Cycle #{cycle_count})")
-            await asyncio.sleep(1)
-            await client.delete_messages(PREDICTION_CHANNEL_ID, test_msg.id)
-            prediction_channel_ok = True
-            logger.info(f"✅ Canal prédiction: {getattr(pred_entity, 'title', 'N/A')}")
+            pred_title = getattr(pred_entity, 'title', 'N/A')
+            
+            # Test d'envoi (sans suppression obligatoire)
+            try:
+                test_msg = await client.send_message(PREDICTION_CHANNEL_ID, f"🤖 Bot connecté! (Cycle #{cycle_count})")
+                prediction_channel_ok = True
+                logger.info(f"✅ Canal prédiction: {pred_title} (Test envoyé: {test_msg.id})")
+                
+                # Tentative de suppression (non bloquante)
+                try:
+                    await asyncio.sleep(1)
+                    await client.delete_messages(PREDICTION_CHANNEL_ID, test_msg.id)
+                except Exception as del_err:
+                    logger.warning(f"⚠️ Impossible de supprimer message test: {del_err}")
+                    
+            except Exception as send_err:
+                prediction_channel_ok = False
+                logger.error(f"❌ Canal prédiction: Impossible d'envoyer - {send_err}")
+                
         except Exception as e:
+            prediction_channel_ok = False
             logger.error(f"❌ Canal prédiction: {e}")
         
+        # Vérifier canal stats (optionnel)
         if STATS_CHANNEL_ID:
             try:
                 stats_entity = await client.get_entity(STATS_CHANNEL_ID)
@@ -660,6 +802,8 @@ async def start_bot():
             logger.warning(f"⚠️ Canal stats non configuré! Utilisez /setstats")
         
         logger.info(f"📏 Offset: +{PREDICTION_OFFSET} | Cycle: 1-1440")
+        logger.info(f"🔌 Canal prédiction OK: {prediction_channel_ok}")
+        
         return True
     except Exception as e:
         logger.error(f"Erreur démarrage: {e}")
