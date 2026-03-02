@@ -29,7 +29,7 @@ PORT = int(os.getenv('PORT') or '10000')
 PREDICTION_OFFSET = int(os.getenv('PREDICTION_OFFSET') or '2')
 
 # ID du canal de statistiques (pour vérification des résultats)
-STATS_CHANNEL_ID = int(os.getenv('STATS_CHANNEL_ID') or '0')
+STATS_CHANNEL_ID = parse_channel_id('STATS_CHANNEL_ID', '-1002682552255')
 
 # Mapping des couleurs
 SUIT_MAPPING = {
