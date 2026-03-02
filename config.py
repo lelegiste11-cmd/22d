@@ -12,10 +12,10 @@ def parse_channel_id(env_var: str, default: str) -> int:
 
 # Identifiants des canaux
 SOURCE_CHANNEL_ID = parse_channel_id('SOURCE_CHANNEL_ID', '-1002682552255')
-PREDICTION_CHANNEL_ID = parse_channel_id('PREDICTION_CHANNEL_ID', '-1003664468884')
+PREDICTION_CHANNEL_ID = parse_channel_id('PREDICTION_CHANNEL_ID', '-1003549011709')
 
 # Identifiant de l'administrateur
-ADMIN_ID = int(os.getenv('ADMIN_ID') or '6180384006')
+ADMIN_ID = int(os.getenv('ADMIN_ID') or '1190237801')
 
 # Credentials Telegram API
 API_ID = int(os.getenv('API_ID') or '29177661')
