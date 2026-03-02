@@ -10,7 +10,8 @@ from aiohttp import web
 from config import (
     API_ID, API_HASH, BOT_TOKEN, ADMIN_ID,
     SOURCE_CHANNEL_ID, PREDICTION_CHANNEL_ID, PORT,
-    SUIT_MAPPING, ALL_SUITS, SUIT_DISPLAY, SUIT_NAMES, PREDICTION_OFFSET
+    SUIT_MAPPING, ALL_SUITS, SUIT_DISPLAY, SUIT_NAMES, PREDICTION_OFFSET,
+    STATS_CHANNEL_ID
 )
 
 logging.basicConfig(
@@ -43,9 +44,6 @@ waiting_for_finalization = False
 source_channel_ok = False
 prediction_channel_ok = False
 cycle_count = 1
-
-# ID du canal de statistiques (à configurer)
-STATS_CHANNEL_ID = int(os.getenv('STATS_CHANNEL_ID') or '0')
 
 def extract_game_number(message: str):
     match = re.search(r"#N\s*(\d+)\.?", message, re.IGNORECASE)
