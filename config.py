@@ -20,13 +20,16 @@ ADMIN_ID = int(os.getenv('ADMIN_ID') or '1190237801')
 # Credentials Telegram API
 API_ID = int(os.getenv('API_ID') or '29177661')
 API_HASH = os.getenv('API_HASH') or 'a8639172fa8d35dbfd8ea46286d349ab'
-BOT_TOKEN = os.getenv('BOT_TOKEN') or '8458163781:AAG7n_qncj-XSlylwtKS--p9axDLsTO7r7M'
+BOT_TOKEN = os.getenv('BOT_TOKEN') or '8670864890:AAEt05Nxw6_7vEsoamDVmridx5X5xRUHQGM'
 
 # Port pour le serveur web (Render.com utilise 10000)
 PORT = int(os.getenv('PORT') or '10000')
 
 # Paramètre 'a' pour la prédiction (nombre entier naturel, défaut = 2)
 PREDICTION_OFFSET = int(os.getenv('PREDICTION_OFFSET') or '2')
+
+# ID du canal de statistiques (pour vérification des résultats)
+STATS_CHANNEL_ID = int(os.getenv('STATS_CHANNEL_ID') or '0')
 
 # Mapping des couleurs
 SUIT_MAPPING = {
