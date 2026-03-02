@@ -7,12 +7,71 @@ from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from aiohttp import web
-from config import (
-    API_ID, API_HASH, BOT_TOKEN, ADMIN_ID,
-    SOURCE_CHANNEL_ID, PREDICTION_CHANNEL_ID, PORT,
-    SUIT_MAPPING, ALL_SUITS, SUIT_DISPLAY, SUIT_NAMES, PREDICTION_OFFSET,
-    STATS_CHANNEL_ID
-)
+
+# ============================================
+# CONFIGURATION DIRECTE DANS MAIN.PY
+# ============================================
+
+# Identifiants des canaux
+SOURCE_CHANNEL_ID = -1002682552255
+PREDICTION_CHANNEL_ID = -1003549011709
+
+# Identifiant de l'administrateur
+ADMIN_ID = 1190237801
+
+# Credentials Telegram API
+API_ID = 29177661
+API_HASH = 'a8639172fa8d35dbfd8ea46286d349ab'
+BOT_TOKEN = '8670864890:AAEt05Nxw6_7vEsoamDVmridx5X5xRUHQGM'
+
+# Port pour le serveur web
+PORT = int(os.getenv('PORT') or '10000')
+
+# Paramètre 'a' pour la prédiction
+PREDICTION_OFFSET = int(os.getenv('PREDICTION_OFFSET') or '2')
+
+# ID du canal de statistiques (optionnel)
+STATS_CHANNEL_ID = -1002682552255
+
+# Mapping des couleurs (copié depuis config.py)
+SUIT_MAPPING = {
+    '♠️': '❤️',
+    '♠': '❤️',
+    '❤️': '♠️',
+    '❤': '♠️',
+    '♥️': '♠️',
+    '♥': '♠️',
+    '♣️': '♦️',
+    '♣': '♦️',
+    '♦️': '♣️',
+    '♦': '♣️'
+}
+
+ALL_SUITS = ['♠', '♥', '♦', '♣']
+
+SUIT_DISPLAY = {
+    '♠': '♠️',
+    '♥': '❤️',
+    '♦': '♦️',
+    '♣': '♣️'
+}
+
+SUIT_NAMES = {
+    '♠️': 'Pique',
+    '♠': 'Pique',
+    '❤️': 'Cœur',
+    '❤': 'Cœur',
+    '♥️': 'Cœur',
+    '♥': 'Cœur',
+    '♦️': 'carreaux',
+    '♦': 'carreaux',
+    '♣️': 'trèfle',
+    '♣': 'trèfle'
+}
+
+# ============================================
+# RESTE DU CODE (identique à votre version)
+# ============================================
 
 logging.basicConfig(
     level=logging.INFO,
