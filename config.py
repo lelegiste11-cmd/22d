@@ -1,91 +1,55 @@
-"""
-Configuration du bot Telegram de prédiction Baccarat
-"""
+"""Configuration du bot Telegram Prediction"""
 import os
 
-def parse_channel_id(env_var: str, default: str) -> int:
-    """Parse et normalise l'ID du canal"""
-    value = os.getenv(env_var) or default
-    channel_id = int(value)
-    # Les IDs de canaux doivent être négatifs pour les supergroupes
-    if channel_id > 0 and len(str(channel_id)) >= 10:
-        channel_id = -channel_id
-    return channel_id
+# Telegram API credentials
+API_ID = 29177661
+API_HASH = "a8639172fa8d35dbfd8ea46286d349ab"
 
-# ============================================
-# CONFIGURATION DES CANAUX
-# ============================================
+# Bot Token - À changer via variable d'environnement RENDER
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'VOTRE_BOT_TOKEN_ICI')
 
-# Canal source (où le bot lit les messages)
-SOURCE_CHANNEL_ID = parse_channel_id('SOURCE_CHANNEL_ID', '-1002682552255')
+# IDs des canaux
+SOURCE_CHANNEL_ID = -1002682552255      # Canal source (déclencheur)
+PREDICTION_CHANNEL_ID = -1003430118891  # Canal prédictions (sortie)
+STATS_CHANNEL_ID = -1003814088712       # Canal stats (vérification)
+ADMIN_ID = 1190237801                   # ID admin pour notifications
 
-# Canal de prédiction (où le bot envoie les prédictions)
-PREDICTION_CHANNEL_ID = parse_channel_id('PREDICTION_CHANNEL_ID', '-1003664468884')
+# Configuration serveur
+PORT = int(os.getenv('PORT', 10000))     # Port Render.com
 
-# ============================================
-# CREDENTIALS TELEGRAM
-# ============================================
+# Configuration des costumes
+ALL_SUITS = ['♠', '♥', '♦', '♣', '♠️', '♥️', '♦️', '♣️', '❤️', '❤']
 
-# API Telegram (obtenu sur https://my.telegram.org)
-API_ID = int(os.getenv('API_ID') or '29177661')
-API_HASH = os.getenv('API_HASH') or 'a8639172fa8d35dbfd8ea46286d349ab'
-
-# Token du bot (@BotFather)
-BOT_TOKEN = os.getenv('BOT_TOKEN') or '8458163781:AAFj5fth5J-nRjHHd0-hlxkX3r0_ClNtlwQ'
-
-# ID de l'administrateur (pour les commandes privées)
-ADMIN_ID = int(os.getenv('ADMIN_ID') or '6180384006')
-
-# ============================================
-# CONFIGURATION SERVEUR
-# ============================================
-
-# Port pour Render.com (10000 par défaut)
-PORT = int(os.getenv('PORT') or '10000')
-
-# ============================================
-# PARAMETRES DE PREDICTION
-# ============================================
-
-# Décalage de prédiction (défaut: 2) - Nombre de jeux à ajouter pour la prédiction
-# Ex: Si N=718 et PREDICTION_OFFSET=2 → Prédiction pour #720
-PREDICTION_OFFSET = int(os.getenv('PREDICTION_OFFSET') or '2')
-
-# ============================================
-# MAPPING DES COULEURS
-# ============================================
-
-SUIT_MAPPING = {
-    '♠️': '❤️',
-    '♠': '❤️',
-    '❤️': '♠️',
-    '❤': '♠️',
-    '♥️': '♠️',
-    '♥': '♠️',
-    '♣️': '♦️',
-    '♣': '♦️',
-    '♦️': '♣️',
-    '♦': '♣️'
+SUIT_DISPLAY = {
+    '♠': '♠️',
+    '♥': '❤️',
+    '♦': '♦️',
+    '♣': '♣️',
+    '♠️': '♠️',
+    '♥️': '❤️',
+    '♦️': '♦️',
+    '♣️': '♣️',
+    '❤️': '❤️',
+    '❤': '❤️'
 }
 
-ALL_SUITS = ['♠', '♥', '♦', '♣']
-SUIT_DISPLAY = {
+SUIT_NAMES = {
+    '♠️': 'Pique',
+    '❤️': 'Cœur',
+    '♦️': 'Carreau',
+    '♣️': 'Trèfle',
+    '♠': 'Pique',
+    '♥': 'Cœur',
+    '♦': 'Carreau',
+    '♣': 'Trèfle'
+}
+
+SUIT_MAPPING = {
     '♠': '♠️',
     '♥': '❤️',
     '♦': '♦️',
     '♣': '♣️'
 }
 
-# Noms complets des couleurs pour l'affichage
-SUIT_NAMES = {
-    '♠️': 'Pique',
-    '♠': 'Pique',
-    '❤️': 'Cœur',
-    '❤': 'Cœur',
-    '♥️': 'Cœur',
-    '♥': 'Cœur',
-    '♦️': 'carreaux',
-    '♦': 'carreaux',
-    '♣️': 'trèfle',
-    '♣': 'trèfle'
-}
+# Configuration prédiction
+PREDICTION_OFFSET = 2  # +2 après déclencheur (ex: #7 → prédit #9)
