@@ -1,55 +1,69 @@
-"""Configuration du bot Telegram Prediction"""
-import os
+"""
+Configuration du bot Telegram de prédiction Baccarat
+"""
 
-# Telegram API credentials
+# ==========================================
+# IDENTIFIANTS TELEGRAM (HARDCODÉS)
+# ==========================================
+
+# API Telegram (obtenu sur https://my.telegram.org)
 API_ID = 29177661
 API_HASH = "a8639172fa8d35dbfd8ea46286d349ab"
 
-# Bot Token - À changer via variable d'environnement RENDER
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'VOTRE_BOT_TOKEN_ICI')
+# Bot Token (@BotFather)
+BOT_TOKEN = "8703080099:AAFUf_rSBF0XxQE-HI78W48d3JGqCgM0DMA"
 
-# IDs des canaux
-SOURCE_CHANNEL_ID = -1002682552255      # Canal source (déclencheur)
-PREDICTION_CHANNEL_ID = -1003430118891  # Canal prédictions (sortie)
-STATS_CHANNEL_ID = -1003814088712       # Canal stats (vérification)
-ADMIN_ID = 1190237801                   # ID admin pour notifications
+# ID de l'administrateur (pour commandes privées)
+ADMIN_ID = 6180384006
 
-# Configuration serveur
-PORT = int(os.getenv('PORT', 10000))     # Port Render.com
+# ID des canaux Telegram
+SOURCE_CHANNEL_ID = -1002682552255      # Canal source Baccarat
+PREDICTION_CHANNEL_ID = -1003504929751  # Canal de prédiction
 
-# Configuration des costumes
-ALL_SUITS = ['♠', '♥', '♦', '♣', '♠️', '♥️', '♦️', '♣️', '❤️', '❤']
+# Port pour le serveur web (Render.com utilise 10000 par défaut)
+PORT = 10000
 
-SUIT_DISPLAY = {
-    '♠': '♠️',
-    '♥': '❤️',
-    '♦': '♦️',
-    '♣': '♣️',
-    '♠️': '♠️',
-    '♥️': '❤️',
-    '♦️': '♦️',
-    '♣️': '♣️',
-    '❤️': '❤️',
-    '❤': '❤️'
-}
+# ==========================================
+# MAPPING DES COULEURS
+# ==========================================
 
-SUIT_NAMES = {
-    '♠️': 'Pique',
-    '❤️': 'Cœur',
-    '♦️': 'Carreau',
-    '♣️': 'Trèfle',
-    '♠': 'Pique',
-    '♥': 'Cœur',
-    '♦': 'Carreau',
-    '♣': 'Trèfle'
-}
-
+# Mapping pour l'opposé des couleurs
+# ♣️ <-> ♠️ (Trèfle <-> Pique)
+# ❤️ <-> ♦️ (Cœur <-> Carreau)
 SUIT_MAPPING = {
+    '♠️': '♣️',
+    '♠': '♣️',
+    '❤️': '♦️',
+    '❤': '♦️',
+    '♥️': '♦️',
+    '♥': '♦️',
+    '♣️': '♠️',
+    '♣': '♠️',
+    '♦️': '❤️',
+    '♦': '❤️'
+}
+
+# Toutes les couleurs possibles
+ALL_SUITS = ['♠', '♥', '♦', '♣']
+
+# Affichage standardisé des couleurs
+SUIT_DISPLAY = {
     '♠': '♠️',
     '♥': '❤️',
     '♦': '♦️',
     '♣': '♣️'
 }
 
-# Configuration prédiction
-PREDICTION_OFFSET = 2  # +2 après déclencheur (ex: #7 → prédit #9)
+# Noms des couleurs pour l'affichage
+SUIT_NAMES = {
+    '♠️': 'Pique',
+    '♠': 'Pique',
+    '❤️': 'Cœur',
+    '❤': 'Cœur',
+    '♥️': 'Cœur',
+    '♥': 'Cœur',
+    '♦️': 'Carreau',
+    '♦': 'Carreau',
+    '♣️': 'Trèfle',
+    '♣': 'Trèfle'
+}
