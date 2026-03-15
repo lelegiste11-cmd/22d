@@ -38,8 +38,7 @@ logger.info(f"Configuration: SOURCE_CHANNEL={SOURCE_CHANNEL_ID}, PREDICTION_CHAN
 session_string = os.getenv('TELEGRAM_SESSION', '')
 client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
-# Variables globales
-# Liste des prédictions actives (plusieurs en parallèle)
+# Variables globales - Mode CONTINU: plusieurs prédictions actives
 active_predictions = {}  # {game_number: prediction_data}
 recent_games = {}
 processed_messages = set()
@@ -49,7 +48,7 @@ source_channel_ok = False
 prediction_channel_ok = False
 transfer_enabled = True
 
-# Décalage fixe: +2 pour avoir des numéros impairs consécutifs
+# Décalage fixe: +2 pour impairs consécutifs
 PREDICTION_OFFSET = 2
 
 def is_odd_number(n: int) -> bool:
@@ -57,12 +56,8 @@ def is_odd_number(n: int) -> bool:
     return n % 2 == 1
 
 def get_next_odd_prediction(base: int) -> int:
-    """
-    Retourne le prochain numéro de prédiction impair.
-    Ex: base=51 → 53, base=52 → 53, base=53 → 55
-    """
-    target = base + PREDICTION_OFFSET  # base + 2
-    # Si pair, ajouter 1 pour obtenir impair
+    """Retourne le prochain numéro impair: base + 2"""
+    target = base + PREDICTION_OFFSET
     if target % 2 == 0:
         target += 1
     return target
@@ -76,6 +71,15 @@ OPPOSITE_SUIT = {
     '♦️': '❤️', '♦': '❤️'
 }
 
+# Mapping de normalisation pour la comparaison
+SUIT_NORMALIZE = {
+    '♠️': 'spade', '♠': 'spade',
+    '❤️': 'heart', '❤': 'heart',
+    '♥️': 'heart', '♥': 'heart',
+    '♦️': 'diamond', '♦': 'diamond',
+    '♣️': 'club', '♣': 'club'
+}
+
 def extract_game_number(message: str):
     """Extrait le numéro de jeu du message"""
     match = re.search(r"#N\s*(\d+)", message, re.IGNORECASE)
@@ -87,28 +91,60 @@ def extract_parentheses_groups(message: str):
     """Extrait les groupes entre parenthèses"""
     return re.findall(r"\(([^)]*)\)", message)
 
-def normalize_suit(suit: str) -> str:
-    """Normalise la couleur au format standard"""
+def normalize_suit_for_comparison(suit: str) -> str:
+    """Normalise la couleur pour comparaison fiable"""
+    if not suit:
+        return ''
     suit = suit.strip()
-    if suit in ['♠', '♠️']:
-        return '♠️'
-    elif suit in ['♥', '♥️', '❤', '❤️']:
-        return '❤️'
-    elif suit in ['♦', '♦️']:
-        return '♦️'
-    elif suit in ['♣', '♣️']:
-        return '♣️'
-    return suit
+    return SUIT_NORMALIZE.get(suit, suit.lower())
+
+def get_all_suits_in_group(group_str: str) -> list:
+    """Extrait TOUTES les couleurs présentes dans le groupe"""
+    if not group_str:
+        return []
+    
+    suits_found = []
+    # Cherche tous les patterns de cartes (nombre/lettre + couleur)
+    # Pattern: nombre ou A/K/Q/J suivi d'une couleur
+    pattern = r"[0-9]+|[AJQKajqk][♠♥♦♣❤️️]|[♠♥♦♣❤️️]"
+    matches = re.findall(pattern, group_str)
+    
+    for match in matches:
+        # Extrait la couleur de la carte
+        for char in match:
+            if char in ['♠', '♥', '♦', '♣', '❤', '♠️', '❤️', '♦️', '♣️', '♥️']:
+                normalized = normalize_suit_for_comparison(char)
+                if normalized and normalized not in suits_found:
+                    suits_found.append(normalized)
+    
+    logger.info(f"Couleurs trouvées dans le groupe: {group_str} -> {suits_found}")
+    return suits_found
 
 def get_first_card_suit(group_str: str):
     """Extrait la couleur de la première carte du groupe"""
+    # Cherche un nombre ou une lettre (A, J, Q, K) suivi d'une couleur
     match = re.search(r"[0-9AJQKajqk]+([♠♥♦♣❤️️])", group_str)
     if match:
-        return normalize_suit(match.group(1))
+        suit = match.group(1)
+        normalized = normalize_suit_for_comparison(suit)
+        logger.info(f"Première carte du groupe '{group_str}': {suit} -> normalisé: {normalized}")
+        return normalized
     return None
 
 def get_opposite_suit(suit: str) -> str:
     """Retourne la couleur opposée"""
+    # D'abord normaliser si c'est un symbole
+    if suit in SUIT_NORMALIZE:
+        normalized = SUIT_NORMALIZE[suit]
+        # Trouver l'opposé basé sur la valeur normalisée
+        opposites = {
+            'club': 'spade', 'spade': 'club',
+            'heart': 'diamond', 'diamond': 'heart'
+        }
+        opposite_normalized = opposites.get(normalized, normalized)
+        # Retourner le symbole standard
+        reverse_map = {'spade': '♠️', 'heart': '❤️', 'diamond': '♦️', 'club': '♣️'}
+        return reverse_map.get(opposite_normalized, suit)
     return OPPOSITE_SUIT.get(suit, suit)
 
 def is_message_finalized(message: str) -> bool:
@@ -118,37 +154,50 @@ def is_message_finalized(message: str) -> bool:
     return '✅' in message or '🔰' in message
 
 def has_suit_in_first_group(message_text: str, target_suit: str) -> bool:
-    """Vérifie si la couleur cible est dans le premier groupe de parenthèses"""
+    """
+    Vérifie si la couleur cible est dans le premier groupe de parenthèses.
+    Version corrigée avec comparaison fiable.
+    """
     groups = extract_parentheses_groups(message_text)
     if not groups:
+        logger.warning(f"Pas de groupe trouvé dans: {message_text[:50]}")
         return False
     
     first_group = groups[0]
-    # Normalise pour comparaison
-    normalized_first = first_group.replace('❤️', '♥').replace('❤', '♥')
-    normalized_target = target_suit.replace('❤️', '♥').replace('❤', '♥')
+    logger.info(f"Vérification groupe: '{first_group}' pour couleur cible: '{target_suit}'")
     
-    # Cherche toutes les couleurs dans le premier groupe
-    suits_in_group = []
-    for suit in ['♠', '♥', '♦', '♣', '❤']:
-        if suit in normalized_first:
-            suits_in_group.append(normalize_suit(suit))
+    # Normalise la couleur cible
+    target_normalized = normalize_suit_for_comparison(target_suit)
+    if not target_normalized:
+        logger.error(f"Impossible de normaliser la couleur cible: {target_suit}")
+        return False
+    
+    # Récupère toutes les couleurs du premier groupe
+    suits_in_group = get_all_suits_in_group(first_group)
+    
+    logger.info(f"Recherche: {target_normalized} dans {suits_in_group}")
     
     # Vérifie si la couleur cible est présente
-    for suit in suits_in_group:
-        if suit == normalized_target:
-            return True
+    if target_normalized in suits_in_group:
+        logger.info(f"✅ COULEUR TROUVÉE: {target_normalized} dans {suits_in_group}")
+        return True
     
+    logger.info(f"❌ Couleur NON trouvée: {target_normalized} pas dans {suits_in_group}")
     return False
 
 async def send_prediction(game_number: int, first_card_suit: str):
-    """Envoie une prédiction au canal - prédiction en continu"""
+    """Envoie une prédiction au canal - EN CONTINU"""
     global active_predictions
     
-    # Calcule le prochain numéro impair (toujours +2)
     target_game = get_next_odd_prediction(game_number)
     
-    opposite_suit = get_opposite_suit(first_card_suit)
+    # Convertir la couleur normalisée en symbole d'affichage
+    display_suits = {
+        'heart': '❤️', 'spade': '♠️', 
+        'diamond': '♦️', 'club': '♣️'
+    }
+    opposite_normalized = normalize_suit_for_comparison(get_opposite_suit(first_card_suit))
+    opposite_suit = display_suits.get(opposite_normalized, '❤️')
     suit_name = SUIT_NAMES.get(opposite_suit, opposite_suit)
     
     prediction_msg = f"""🎰 PRÉDICTION #{target_game}
@@ -160,17 +209,18 @@ async def send_prediction(game_number: int, first_card_suit: str):
         try:
             pred_msg = await client.send_message(PREDICTION_CHANNEL_ID, prediction_msg)
             msg_id = pred_msg.id
-            logger.info(f"✅ Prédiction envoyée: Jeu #{target_game} - {opposite_suit} (base: #{game_number})")
+            logger.info(f"✅ PRÉDICTION ENVOYÉE: #{target_game} - {opposite_suit} (normalisé: {opposite_normalized})")
         except Exception as e:
             logger.error(f"❌ Erreur envoi prédiction: {e}")
     else:
         logger.warning(f"⚠️ Canal de prédiction non accessible")
 
-    # Stocke la prédiction active
+    # Stocke avec la couleur normalisée pour comparaison fiable
     active_predictions[target_game] = {
         'game_number': target_game,
         'message_id': msg_id,
-        'predicted_suit': opposite_suit,
+        'predicted_suit': opposite_normalized,  # Stocke la version normalisée
+        'predicted_suit_display': opposite_suit,  # Pour l'affichage
         'base_game': game_number,
         'first_card_suit': first_card_suit,
         'status': '⏳⏳',
@@ -190,11 +240,11 @@ async def update_prediction_status(game_number: int, status_code: str, status_em
     try:
         pred = active_predictions[game_number]
         message_id = pred['message_id']
-        suit = pred['predicted_suit']
-        suit_name = SUIT_NAMES.get(suit, suit)
+        suit_display = pred.get('predicted_suit_display', '❤️')
+        suit_name = SUIT_NAMES.get(suit_display, suit_display)
 
         updated_msg = f"""📡 PRÉDICTION #{game_number}
-🎯 Couleur: {suit} {suit_name}
+🎯 Couleur: {suit_display} {suit_name}
 🌪️ Statut: {status_emoji}"""
 
         if PREDICTION_CHANNEL_ID and message_id > 0 and prediction_channel_ok:
@@ -218,55 +268,62 @@ async def update_prediction_status(game_number: int, status_code: str, status_em
         logger.error(f"Erreur mise à jour prédiction: {e}")
         return False
 
-async def check_prediction_result(game_number: int, message_text: str):
-    """Vérifie le résultat de toutes les prédictions actives"""
+async def check_all_predictions(game_number: int, message_text: str):
+    """Vérifie TOUTES les prédictions actives contre ce message"""
     global active_predictions
     
     if not active_predictions:
         return
     
-    # Vérifie chaque prédiction active
-    predictions_to_check = list(active_predictions.items())
+    logger.info(f"🔍 Vérification des prédictions pour jeu #{game_number}")
+    logger.info(f"Prédictions actives: {list(active_predictions.keys())}")
     
-    for pred_game, pred_data in predictions_to_check:
+    # Vérifie chaque prédiction active
+    for pred_game in list(active_predictions.keys()):
+        pred_data = active_predictions[pred_game]
         target_game = pred_data['game_number']
-        predicted_suit = pred_data['predicted_suit']
+        predicted_suit = pred_data['predicted_suit']  # Version normalisée
         check_count = pred_data.get('check_count', 0)
         current_status = pred_data.get('status', '⏳⏳')
+        
+        logger.info(f"  -> Vérification prédiction #{target_game}: {predicted_suit} (check_count: {check_count})")
         
         # Si déjà terminée, skip
         if current_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '❌']:
             continue
         
-        # Vérification au numéro exact (N+a)
+        # Vérification au numéro exact
         if game_number == target_game and check_count == 0:
-            if has_suit_in_first_group(message_text, predicted_suit):
+            found = has_suit_in_first_group(message_text, predicted_suit)
+            if found:
                 await update_prediction_status(target_game, '✅0️⃣', '🍯✅0️⃣')
             else:
                 pred_data['check_count'] = 1
-                logger.info(f"Prédiction #{target_game}: {predicted_suit} non trouvé, attente #{target_game+1}")
+                logger.info(f"🔍 #{target_game}: {predicted_suit} non trouvé au numéro exact, attente #{target_game+1}")
         
         # Vérification au numéro + 1
         elif game_number == target_game + 1 and check_count == 1:
-            if has_suit_in_first_group(message_text, predicted_suit):
+            found = has_suit_in_first_group(message_text, predicted_suit)
+            if found:
                 await update_prediction_status(target_game, '✅1️⃣', '🍯✅1️⃣')
             else:
                 pred_data['check_count'] = 2
-                logger.info(f"Prédiction #{target_game}: {predicted_suit} non trouvé au +1, attente #{target_game+2}")
+                logger.info(f"🔍 #{target_game}: {predicted_suit} non trouvé au +1, attente #{target_game+2}")
         
         # Vérification au numéro + 2
         elif game_number == target_game + 2 and check_count == 2:
-            if has_suit_in_first_group(message_text, predicted_suit):
+            found = has_suit_in_first_group(message_text, predicted_suit)
+            if found:
                 await update_prediction_status(target_game, '✅2️⃣', '🍯✅2️⃣')
             else:
                 await update_prediction_status(target_game, '❌', '❌')
         
-        # Si on dépasse le numéro + 2 sans trouver
+        # Si on dépasse le numéro + 2
         elif game_number > target_game + 2:
             await update_prediction_status(target_game, '❌', '❌')
 
 async def process_new_message(message_text: str, chat_id: int, is_finalized: bool = False):
-    """Traite un nouveau message du canal source"""
+    """Traite un nouveau message - MODE CONTINU"""
     global last_transferred_game, current_game_number
     
     try:
@@ -291,7 +348,7 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
         first_group = groups[0]
         second_group = groups[1]
 
-        logger.info(f"Jeu #{game_number} - G1: {first_group}, G2: {second_group}")
+        logger.info(f"📥 Jeu #{game_number} reçu - G1: {first_group}, G2: {second_group}")
 
         # Transfert des messages finalisés à l'admin
         if is_finalized and transfer_enabled and ADMIN_ID and last_transferred_game != game_number:
@@ -302,26 +359,24 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
             except Exception as e:
                 logger.error(f"❌ Erreur transfert: {e}")
 
-        # VÉRIFICATION: Vérifie toutes les prédictions actives (immédiate, pas besoin d'attendre finalisation)
-        await check_prediction_result(game_number, message_text)
+        # VÉRIFICATION: Vérifie TOUTES les prédictions actives (immédiate)
+        await check_all_predictions(game_number, message_text)
 
-        # PRÉDICTION EN CONTINU: Si le numéro est impair, prédit immédiatement (sans attendre)
+        # PRÉDICTION EN CONTINU: Si impair, prédit immédiatement (sans attendre)
         if is_odd_number(game_number):
             second_group_clean = second_group.strip()
-            # Vérifie que le 2ème groupe a des cartes
             if second_group_clean and second_group_clean != '0':
                 first_card_suit = get_first_card_suit(second_group)
                 if first_card_suit:
                     opposite = get_opposite_suit(first_card_suit)
-                    
-                    # Vérifie si on a déjà une prédiction pour ce numéro cible
                     target_game = get_next_odd_prediction(game_number)
                     
+                    # Vérifie si on a déjà une prédiction pour ce numéro cible
                     if target_game not in active_predictions:
-                        logger.info(f"🎯 NOUVELLE PRÉDICTION - Jeu #{game_number} (impair) → prédit #{target_game}: {opposite}")
+                        logger.info(f"🎯 NOUVELLE PRÉDICTION #{target_game} (base: #{game_number}): {opposite}")
                         await send_prediction(game_number, first_card_suit)
                     else:
-                        logger.info(f"⏭️ Prédiction #{target_game} existe déjà, on continue")
+                        logger.info(f"⏭️ Prédiction #{target_game} existe déjà")
 
         # Stockage des données
         recent_games[game_number] = {
@@ -387,13 +442,17 @@ async def handle_edited_message(event):
 async def cmd_start(event):
     if event.is_group or event.is_channel:
         return
-    await event.respond("""🤖 **Bot de Prédiction Baccarat - Mode Continu**
+    await event.respond("""🤖 **Bot de Prédiction Baccarat - MODE CONTINU (V2)**
+
+**Corrections:**
+• Vérification fiable des couleurs (cœur, carreau, pique, trèfle)
+• Normalisation améliorée pour éviter les faux négatifs
+• Logging détaillé pour le débogage
 
 **Règles:**
 • Prédit **en continu** chaque 2 jeux (impairs)
 • **Pas d'attente** entre les prédictions
 • Séquence: 51 → 53 → 55 → 57 → 59 → 61...
-• Plusieurs prédictions peuvent être actives simultanément
 
 **Commandes:**
 • `/status` - Voir les prédictions actives
@@ -417,7 +476,8 @@ async def cmd_status(event):
     if active_predictions:
         status_msg += f"**🔮 Prédictions actives ({len(active_predictions)}):**\n"
         for game_num, pred in sorted(active_predictions.items()):
-            status_msg += f"• #{game_num}: {pred['predicted_suit']} - {pred['status']}\n"
+            display_suit = pred.get('predicted_suit_display', pred['predicted_suit'])
+            status_msg += f"• #{game_num}: {display_suit} ({pred['predicted_suit']}) - {pred['status']}\n"
     else:
         status_msg += "**🔮 Aucune prédiction active**"
 
@@ -434,7 +494,7 @@ async def cmd_debug(event):
 • Source Channel: {SOURCE_CHANNEL_ID}
 • Prediction Channel: {PREDICTION_CHANNEL_ID}
 • Admin ID: {ADMIN_ID}
-• Décalage: +{PREDICTION_OFFSET} (impairs consécutifs)
+• Décalage: +{PREDICTION_OFFSET}
 
 **Accès aux canaux:**
 • Canal source: {'✅ OK' if source_channel_ok else '❌ Non accessible'}
@@ -445,10 +505,11 @@ async def cmd_debug(event):
 • Prédictions actives: {len(active_predictions)}
 • Port: {PORT}
 
-**Mode CONTINU:**
-• Prédit chaque 2 jeux SANS attendre
-• 51→53→55→57→59→61...
-• Vérification en parallèle de toutes les prédictions
+**Corrections de vérification:**
+• Normalisation: ♠️→spade, ❤️/♥️→heart, ♦️→diamond, ♣️→club
+• Extraction de TOUTES les couleurs du premier groupe
+• Comparaison par valeur normalisée (pas par symbole)
+• Logging détaillé pour chaque vérification
 """
     await event.respond(debug_msg)
 
@@ -517,26 +578,21 @@ async def cmd_help(event):
     if event.is_group or event.is_channel:
         return
 
-    await event.respond(f"""📖 **Aide - Bot de Prédiction (Mode Continu)**
+    await event.respond(f"""📖 **Aide - Bot de Prédiction (Mode Continu V2)**
+
+**Problème corrigé:**
+La vérification des cœurs (❤️) ne fonctionnait pas car:
+- ❤️ et ♥️ sont deux symboles différents pour la même couleur
+- Le bot normalise maintenant tous les symboles en valeurs standard
 
 **Logique de prédiction en CONTINU:**
 
-Le bot prédit **sans attendre** la fin des vérifications.
 
-**Exemple de flux:**
-Jeu #51 (impair) → 🎰 PRÉDICTION #53 Jeu #53 (impair) → 🎰 PRÉDICTION #55
-Jeu #55 (impair) → 🎰 PRÉDICTION #57 Jeu #57 (impair) → 🎰 PRÉDICTION #59 ...
-    
-**Vérification en parallèle:**
-• Quand #53 arrive: vérifie si ♣️ dans G1 → met à jour statut
-• Quand #54 arrive: vérifie ♣️ (si pas trouvé) → ✅1️⃣
-• Quand #55 arrive: vérifie ♣️ (si pas trouvé) → ✅2️⃣ ou ❌
-• En même temps: nouvelle prédiction #57
-
-**Résultat:**
-• Plusieurs prédictions actives simultanément
-• Aucune attente entre les prédictions
-• Vérification continue de toutes les prédictions en cours
+**Vérification améliorée:**
+• Extrait TOUTES les couleurs du premier groupe
+• Normalise: ♠️→spade, ❤️/♥️→heart, ♦️→diamond, ♣️→club
+• Compare les valeurs normalisées (fiable)
+• Logging détaillé dans les logs
 
 **Commandes:**
 • `/start` - Démarrer
@@ -564,7 +620,7 @@ async def index(request):
         </style>
     </head>
     <body>
-        <h1>🎯 Bot de Prédiction Baccarat (Mode Continu)</h1>
+        <h1>🎯 Bot de Prédiction Baccarat (Mode Continu V2)</h1>
         <div class="status">
             <h2>Statut du Bot</h2>
             <p><strong>🎮 Jeu actuel:</strong> #{current_game_number}</p>
@@ -572,6 +628,7 @@ async def index(request):
             <p><strong>📐 Décalage:</strong> +{PREDICTION_OFFSET} (impairs consécutifs)</p>
             <p><strong>📡 Canal Source:</strong> {'✅ Connecté' if source_channel_ok else '❌ Non connecté'}</p>
             <p><strong>🎯 Canal Prédiction:</strong> {'✅ Connecté' if prediction_channel_ok else '❌ Non connecté'}</p>
+            <p><strong>✨ Version:</strong> V2 (correction vérification cœurs)</p>
         </div>
         <ul>
             <li><a href="/health">Health Check</a></li>
@@ -594,8 +651,15 @@ async def status_api(request):
         "prediction_channel_ok": prediction_channel_ok,
         "current_game": current_game_number,
         "active_predictions_count": len(active_predictions),
-        "active_predictions": {k: v['status'] for k, v in active_predictions.items()},
+        "active_predictions": {
+            k: {
+                'status': v['status'],
+                'suit': v.get('predicted_suit_display', v['predicted_suit'])
+            } 
+            for k, v in active_predictions.items()
+        },
         "prediction_offset": PREDICTION_OFFSET,
+        "version": "V2",
         "timestamp": datetime.now().isoformat()
     }
     return web.json_response(status_data)
@@ -615,7 +679,7 @@ async def start_web_server():
 async def start_bot():
     global source_channel_ok, prediction_channel_ok
     try:
-        logger.info("🚀 Démarrage du bot...")
+        logger.info("🚀 Démarrage du bot V2...")
         await client.start(bot_token=BOT_TOKEN)
         logger.info("✅ Bot Telegram connecté")
 
@@ -638,15 +702,16 @@ async def start_bot():
 
         try:
             pred_entity = await client.get_entity(PREDICTION_CHANNEL_ID)
-            test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🤖 Bot connecté et prêt!")
+            test_msg = await client.send_message(PREDICTION_CHANNEL_ID, "🤖 Bot V2 connecté et prêt!")
             await asyncio.sleep(1)
             await client.delete_messages(PREDICTION_CHANNEL_ID, test_msg.id)
             prediction_channel_ok = True
             logger.info(f"✅ Canal prédiction: {getattr(pred_entity, 'title', 'N/A')}")
         except Exception as e:
-            logger.error(f"❌ Canal prédiction inaccessible: {e}")
+            logger.error(f"❌ Canal prédition inaccessible: {e}")
 
-        logger.info(f"📐 Mode CONTINU: +{PREDICTION_OFFSET} (impairs: 51→53→55→57→59→61...)")
+        logger.info(f"📐 Mode CONTINU V2: +{PREDICTION_OFFSET} (impairs: 51→53→55→57→59→61...)")
+        logger.info("🔧 Correction vérification: normalisation ♠️/♥️/♦️/♣️ → spade/heart/diamond/club")
         logger.info("👀 Surveillance active du canal source...")
 
         return True
@@ -664,7 +729,7 @@ async def main():
             logger.error("Échec du démarrage, arrêt du bot")
             return
         
-        logger.info("🎉 Bot complètement opérationnel en mode CONTINU!")
+        logger.info("🎉 Bot V2 complètement opérationnel!")
         await client.run_until_disconnected()
     except Exception as e:
         logger.error(f"❌ Erreur: {e}")
