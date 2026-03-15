@@ -49,7 +49,20 @@ prediction_channel_ok = False
 transfer_enabled = True
 
 # Décalage de prédiction (configurable via /offset)
-PREDICTION_OFFSET = 2
+PREDICTION_OFFSET = 2  # Défaut: +2 pour impairs (ex: 37 -> 39)
+PREDICTION_OFFSET_AFTER_FAIL = 4  # Après échec: +4 (ex: 37 -> 41)
+
+def is_odd_number(n: int) -> bool:
+    """Vérifie si un nombre est impair (se termine par 1,3,5,7,9)"""
+    return n % 2 == 1
+
+def get_next_odd_number(base: int, offset: int = 2) -> int:
+    """Retourne le prochain numéro impair à partir de base + offset"""
+    target = base + offset
+    # Si target est pair, ajouter 1 pour obtenir impair
+    if target % 2 == 0:
+        target += 1
+    return target
 
 # Mapping des opposés
 OPPOSITE_SUIT = {
@@ -102,11 +115,29 @@ def is_message_finalized(message: str) -> bool:
         return False
     return '✅' in message or '🔰' in message
 
-async def send_prediction(game_number: int, first_card_suit: str):
-    """Envoie une prédiction au canal"""
-    global active_prediction
+def has_suit_in_first_group(message_text: str, target_suit: str) -> bool:
+    """Vérifie si la couleur cible est dans le premier groupe de parenthèses"""
+    groups = extract_parentheses_groups(message_text)
+    if not groups:
+        return False
     
-    target_game = game_number + PREDICTION_OFFSET
+    first_group = groups[0]
+    first_card_suit = get_first_card_suit(first_group)
+    
+    if first_card_suit and first_card_suit == target_suit:
+        return True
+    return False
+
+async def send_prediction(game_number: int, first_card_suit: str, is_after_fail: bool = False):
+    """Envoie une prédiction au canal"""
+    global active_prediction, PREDICTION_OFFSET
+    
+    # Détermine le décalage à utiliser
+    offset = PREDICTION_OFFSET_AFTER_FAIL if is_after_fail else PREDICTION_OFFSET
+    
+    # Calcule le prochain numéro impair
+    target_game = get_next_odd_number(game_number, offset)
+    
     opposite_suit = get_opposite_suit(first_card_suit)
     suit_name = SUIT_NAMES.get(opposite_suit, opposite_suit)
     
@@ -119,7 +150,7 @@ async def send_prediction(game_number: int, first_card_suit: str):
         try:
             pred_msg = await client.send_message(PREDICTION_CHANNEL_ID, prediction_msg)
             msg_id = pred_msg.id
-            logger.info(f"✅ Prédiction envoyée: Jeu #{target_game} - {opposite_suit}")
+            logger.info(f"✅ Prédiction envoyée: Jeu #{target_game} - {opposite_suit} (décalage: +{offset})")
         except Exception as e:
             logger.error(f"❌ Erreur envoi prédiction: {e}")
     else:
@@ -167,58 +198,62 @@ async def update_prediction_status(game_number: int, status_code: str, status_em
         
         # Libère la prédiction active après vérification
         if status_code in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '❌']:
+            was_fail = (status_code == '❌')
             active_prediction = None
-            logger.info(f"Prédiction #{game_number} terminée, prêt pour nouvelle prédiction")
+            logger.info(f"Prédiction #{game_number} terminée ({status_code}), prêt pour nouvelle prédiction")
+            return was_fail  # Retourne True si c'était un échec
 
-        return True
+        return False
 
     except Exception as e:
         logger.error(f"Erreur mise à jour prédiction: {e}")
         return False
 
-async def check_prediction_result(game_number: int, first_group: str):
-    """Vérifie le résultat de la prédiction"""
+async def check_prediction_result(game_number: int, message_text: str):
+    """Vérifie le résultat de la prédiction en observant les messages finalisés"""
     global active_prediction
     
     if active_prediction is None:
-        return
+        return None
         
     pred = active_prediction
     target_game = pred['game_number']
     predicted_suit = pred['predicted_suit']
+    check_count = pred.get('check_count', 0)
     
-    current_card_suit = get_first_card_suit(first_group)
-    if not current_card_suit:
-        return
-    
-    # Vérification au numéro exact (N+a)
-    if game_number == target_game:
-        if current_card_suit == predicted_suit:
+    # Vérification au numéro exact (N+a) - uniquement si on n'a pas encore vérifié
+    if game_number == target_game and check_count == 0:
+        if has_suit_in_first_group(message_text, predicted_suit):
             await update_prediction_status(target_game, '✅0️⃣', '🍯✅0️⃣')
-            return True
+            return 'success'
         else:
             pred['check_count'] = 1
-            logger.info(f"Prédiction #{target_game}: non trouvée, attente jeu +1")
-            return False
+            logger.info(f"Prédiction #{target_game}: couleur {predicted_suit} non trouvée au numéro exact, attente #{target_game+1}")
+            return 'continue'
     
     # Vérification au numéro + 1
-    elif game_number == target_game + 1 and pred.get('check_count') == 1:
-        if current_card_suit == predicted_suit:
+    elif game_number == target_game + 1 and check_count == 1:
+        if has_suit_in_first_group(message_text, predicted_suit):
             await update_prediction_status(target_game, '✅1️⃣', '🍯✅1️⃣')
-            return True
+            return 'success'
         else:
             pred['check_count'] = 2
-            logger.info(f"Prédiction #{target_game}: non trouvée au +1, attente jeu +2")
-            return False
+            logger.info(f"Prédiction #{target_game}: couleur {predicted_suit} non trouvée au +1, attente #{target_game+2}")
+            return 'continue'
     
     # Vérification au numéro + 2
-    elif game_number == target_game + 2 and pred.get('check_count') == 2:
-        if current_card_suit == predicted_suit:
+    elif game_number == target_game + 2 and check_count == 2:
+        if has_suit_in_first_group(message_text, predicted_suit):
             await update_prediction_status(target_game, '✅2️⃣', '🍯✅2️⃣')
-            return True
+            return 'success'
         else:
-            await update_prediction_status(target_game, '❌', '❌')
-            return False
+            was_fail = await update_prediction_status(target_game, '❌', '❌')
+            return 'fail'
+    
+    # Si on dépasse le numéro + 2 sans trouver, c'est un échec
+    elif game_number > target_game + 2 and check_count >= 0:
+        was_fail = await update_prediction_status(target_game, '❌', '❌')
+        return 'fail'
     
     return None
 
@@ -260,8 +295,12 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
                 logger.error(f"❌ Erreur transfert: {e}")
 
         # Vérification de la prédiction (uniquement sur messages finalisés)
-        if is_finalized:
-            await check_prediction_result(game_number, first_group)
+        if is_finalized and active_prediction is not None:
+            result = await check_prediction_result(game_number, message_text)
+            
+            # Si échec, on mémorise pour la prochaine prédiction
+            if result == 'fail':
+                logger.info(f"💾 Échec enregistré pour jeu #{game_number}, prochaine prédiction utilisera +{PREDICTION_OFFSET_AFTER_FAIL}")
 
         # Nouvelle prédiction si pas de prédiction active
         if active_prediction is None:
@@ -271,15 +310,37 @@ async def process_new_message(message_text: str, chat_id: int, is_finalized: boo
                 first_card_suit = get_first_card_suit(second_group)
                 if first_card_suit:
                     opposite = get_opposite_suit(first_card_suit)
+                    
+                    # Détermine si on doit utiliser le décalage après échec
+                    # On regarde si le dernier jeu était un échec
+                    is_after_fail = False
+                    if recent_games:
+                        last_game_num = max(recent_games.keys())
+                        last_game = recent_games.get(last_game_num, {})
+                        if last_game.get('was_fail', False):
+                            is_after_fail = True
+                    
                     logger.info(f"🎯 Nouvelle prédiction - Jeu #{game_number}, carte: {first_card_suit} → prédit: {opposite}")
-                    await send_prediction(game_number, first_card_suit)
+                    await send_prediction(game_number, first_card_suit, is_after_fail)
 
         # Stockage des données
         recent_games[game_number] = {
             'first_group': first_group,
             'second_group': second_group,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'was_fail': False  # Par défaut, sera mis à jour si échec
         }
+        
+        # Met à jour le statut d'échec si nécessaire
+        if active_prediction is None and game_number > 0:
+            # Vérifie si on vient de terminer une prédiction en échec
+            prev_pred_game = None
+            for gn, data in recent_games.items():
+                if gn < game_number and gn > game_number - 10:  # Cherche dans les 10 derniers jeux
+                    if data.get('prediction_ended', False) and data.get('result') == '❌':
+                        recent_games[game_number]['was_fail'] = True
+                        break
+        
         if len(recent_games) > 100:
             oldest = min(recent_games.keys())
             del recent_games[oldest]
@@ -341,9 +402,14 @@ async def cmd_start(event):
 
 Ce bot surveille le canal source et envoie des prédictions automatiques basées sur la première carte du deuxième groupe.
 
+**Règles:**
+• Prédit uniquement les numéros **impairs** (1,3,5,7,9)
+• Décalage normal: +2 (ex: 37 → 39)
+• Après échec: +4 (ex: 37 → 41)
+
 **Commandes:**
 • `/status` - Voir les prédictions en cours
-• `/offset` - Voir/modifier le décalage de prédiction (a)
+• `/offset` - Modifier le décalage
 • `/help` - Aide détaillée
 • `/debug` - Informations de débogage
 • `/checkchannels` - Vérifier l'accès aux canaux""")
@@ -359,15 +425,17 @@ async def cmd_status(event):
 
     status_msg = f"📊 **État des prédictions:**\n\n"
     status_msg += f"🎮 Jeu actuel: #{current_game_number}\n"
-    status_msg += f"📐 Décalage (a): {PREDICTION_OFFSET}\n\n"
+    status_msg += f"📐 Décalage normal: +{PREDICTION_OFFSET}\n"
+    status_msg += f"📐 Décalage après échec: +{PREDICTION_OFFSET_AFTER_FAIL}\n\n"
 
     if active_prediction:
         pred = active_prediction
         distance = pred['game_number'] - current_game_number
         status_msg += f"**🔮 Prédiction active:**\n"
-        status_msg += f"• Jeu cible: #{pred['game_number']}\n"
+        status_msg += f"• Jeu cible: #{pred['game_number']} (impair: {'Oui' if is_odd_number(pred['game_number']) else 'Non'})\n"
         status_msg += f"• Couleur prédite: {pred['predicted_suit']}\n"
         status_msg += f"• Statut: {pred['status']}\n"
+        status_msg += f"• Nombre de vérifications: {pred.get('check_count', 0)}\n"
         status_msg += f"• Distance: {distance} jeux"
     else:
         status_msg += "**🔮 Aucune prédiction active - Prêt à prédire**"
@@ -376,7 +444,7 @@ async def cmd_status(event):
 
 @client.on(events.NewMessage(pattern='/offset'))
 async def cmd_offset(event):
-    global PREDICTION_OFFSET
+    global PREDICTION_OFFSET, PREDICTION_OFFSET_AFTER_FAIL
     
     if event.is_group or event.is_channel:
         return
@@ -393,11 +461,12 @@ async def cmd_offset(event):
         new_offset = int(match.group(1))
         if 1 <= new_offset <= 10:
             PREDICTION_OFFSET = new_offset
-            await event.respond(f"✅ Décalage modifié: a = {PREDICTION_OFFSET}")
+            PREDICTION_OFFSET_AFTER_FAIL = new_offset + 2  # Échec = normal + 2
+            await event.respond(f"✅ Décalage modifié: +{PREDICTION_OFFSET} (après échec: +{PREDICTION_OFFSET_AFTER_FAIL})")
         else:
             await event.respond("❌ Le décalage doit être entre 1 et 10")
     else:
-        await event.respond(f"📐 Décalage actuel: a = {PREDICTION_OFFSET}\n\nPour modifier: `/offset [nombre]` (1-10)")
+        await event.respond(f"📐 Décalage actuel: +{PREDICTION_OFFSET} (après échec: +{PREDICTION_OFFSET_AFTER_FAIL})\n\nPour modifier: `/offset [nombre]` (1-10)")
 
 @client.on(events.NewMessage(pattern='/debug'))
 async def cmd_debug(event):
@@ -410,7 +479,8 @@ async def cmd_debug(event):
 • Source Channel: {SOURCE_CHANNEL_ID}
 • Prediction Channel: {PREDICTION_CHANNEL_ID}
 • Admin ID: {ADMIN_ID}
-• Décalage (a): {PREDICTION_OFFSET}
+• Décalage normal: +{PREDICTION_OFFSET}
+• Décalage après échec: +{PREDICTION_OFFSET_AFTER_FAIL}
 
 **Accès aux canaux:**
 • Canal source: {'✅ OK' if source_channel_ok else '❌ Non accessible'}
@@ -422,10 +492,11 @@ async def cmd_debug(event):
 • Port: {PORT}
 
 **Règles de prédiction:**
+• Uniquement numéros impairs (1,3,5,7,9)
 • Déclenchement: 2ème groupe reçoit des cartes
 • Prédiction: Opposé de la 1ère carte du 2ème groupe
-• Numéro: N + a (a={PREDICTION_OFFSET})
-• Une prédiction à la fois
+• Vérification: Premier groupe des messages finalisés
+• Succès immédiat (✅0️⃣), +1 (✅1️⃣), +2 (✅2️⃣) ou Échec (❌)
 """
     await event.respond(debug_msg)
 
@@ -508,21 +579,24 @@ async def cmd_help(event):
    • ♠️ → ♣️ (Pique → Trèfle)
    • ❤️ → ♦️ (Cœur → Carreau)
    • ♦️ → ❤️ (Carreau → Cœur)
-5. Numéro prédit: **N + a** (défaut a=2)
+5. Numéro prédit: **N + a** (uniquement impairs)
 
-**Exemple:**
-#N430. ✅4(10♦️5♠️9♠️) - 0(10♥️J♥️K♦️)
-→ 2ème groupe: (10♥️J♥️K♦️)
-→ 1ère carte: 10♥️
-tu prédit ♦️ au numéro 430+2=432
+**Exemples:**
+#N37. ✅4(10♦️5♠️9♠️) - 0(10♥️J♥️K♦️)
+→ Prédiction: #39 (37+2, impair)
+2ème groupe: (10♥️J♥️K♦️)
+lère carte: 10♥️
+tu prédit ♦️ au numéIO
+37+2=39
+Si échec au #39:
+→ Prochaine prédiction: #41 (37+4, impair)
 
-**Vérification:**
-• Attend que le message soit **finalisé** (✅ ou 🔰)
-• Vérifie si la couleur apparaît au numéro prédit
-• 🍯✅0️⃣ = Trouvé au numéro exact
-• 🍯✅1️⃣ = Trouvé au numéro+1
-• 🍯✅2️⃣ = Trouvé au numéro+2
-• ❌ = Non trouvé
+**Vérification (sur messages finalisés ✅):**
+1. Vérifie le **premier groupe** du message
+2. ✅0️⃣ = Couleur trouvée au numéro exact
+3. ✅1️⃣ = Couleur trouvée au numéro+1
+4. ✅2️⃣ = Couleur trouvée au numéro+2
+5. ❌ = Non trouvé après 3 tentatives
 
 **Commandes:**
 • `/start` - Démarrer
@@ -556,7 +630,8 @@ async def index(request):
             <h2>Statut du Bot</h2>
             <p><strong>🎮 Jeu actuel:</strong> #{current_game_number}</p>
             <p><strong>🔮 Prédiction active:</strong> <span class="{'active' if active_prediction else 'inactive'}">{'Oui' if active_prediction else 'Non'}</span></p>
-            <p><strong>📐 Décalage (a):</strong> {PREDICTION_OFFSET}</p>
+            <p><strong>📐 Décalage normal:</strong> +{PREDICTION_OFFSET}</p>
+            <p><strong>📐 Après échec:</strong> +{PREDICTION_OFFSET_AFTER_FAIL}</p>
             <p><strong>📡 Canal Source:</strong> {'✅ Connecté' if source_channel_ok else '❌ Non connecté'}</p>
             <p><strong>🎯 Canal Prédiction:</strong> {'✅ Connecté' if prediction_channel_ok else '❌ Non connecté'}</p>
         </div>
@@ -582,6 +657,7 @@ async def status_api(request):
         "current_game": current_game_number,
         "prediction_active": active_prediction is not None,
         "prediction_offset": PREDICTION_OFFSET,
+        "prediction_offset_after_fail": PREDICTION_OFFSET_AFTER_FAIL,
         "timestamp": datetime.now().isoformat()
     }
     return web.json_response(status_data)
@@ -638,7 +714,8 @@ async def start_bot():
             logger.error(f"❌ Canal prédiction inaccessible: {e}")
             logger.error("   → Ajoutez le bot comme ADMINISTRATEUR du canal")
 
-        logger.info(f"📐 Décalage de prédiction: a = {PREDICTION_OFFSET}")
+        logger.info(f"📐 Décalage normal: +{PREDICTION_OFFSET}")
+        logger.info(f"📐 Après échec: +{PREDICTION_OFFSET_AFTER_FAIL}")
         logger.info("👀 Surveillance active du canal source...")
 
         return True
@@ -674,4 +751,3 @@ if __name__ == '__main__':
         logger.error(f"❌ Erreur fatale: {e}")
         import traceback
         logger.error(traceback.format_exc())
-
