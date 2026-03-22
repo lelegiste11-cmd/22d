@@ -3,9 +3,14 @@ import re
 import logging
 import asyncio
 from datetime import datetime
-from collections import defaultdict
-from telegram import Bot, Update
+from http import HTTPStatus
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI, Request, Response
+from telegram import Update, Bot
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
@@ -15,11 +20,10 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-# Import de la configuration
 from config import (
     API_ID, API_HASH, BOT_TOKEN, ADMIN_ID,
     SOURCE_CHANNEL_ID, PREDICTION_CHANNEL_ID,
-    PORT, DEFAULT_OFFSET, FAILURE_OFFSET,
+    PORT, WEBHOOK_URL, DEFAULT_OFFSET, FAILURE_OFFSET,
     SUIT_OPPOSITE, SUIT_EMOJI, validate_config
 )
 
@@ -38,52 +42,35 @@ last_prediction_failed: bool = False
 # ─── Utilitaires ─────────────────────────────────────────────────────────────
 
 def extract_first_card_suit(group_text: str) -> str | None:
-    """Extrait la couleur de la première carte d'un groupe"""
     suits = [c for c in group_text if c in SUIT_OPPOSITE]
     return suits[0] if suits else None
 
 
 def is_odd_number(n: int) -> bool:
-    """Vérifie si un nombre se termine par 1,3,5,7,9"""
-    last_digit = n % 10
-    return last_digit in [1, 3, 5, 7, 9]
+    return (n % 10) in [1, 3, 5, 7, 9]
 
 
 def build_prediction_text(target_n: int, suit: str, status: str) -> str:
-    """Construit le texte de prédiction au format demandé"""
     suit_display = SUIT_EMOJI.get(suit, suit)
-    return (
-        f"🎰 PRÉDICTION #{target_n}\n"
-        f"🎯 Couleur: {suit_display}\n"
-        f"🌪️ Statut: {status}"
-    )
+    return f"🎰 PRÉDICTION #{target_n}\n🎯 Couleur: {suit_display}\n🌪️ Statut: {status}"
 
 
 def parse_game(text: str) -> dict | None:
-    """Parse un message de jeu"""
-    # Format : #N371. ✅7(5♥️7♦️5♥️) - 5(A♥️Q♦️4♣️) #T12
-    GAME_RE = re.compile(
-        r"#N(\d+)\.\s*(✅?)\s*\S+\(([^)]+)\)\s*-\s*(✅?)\s*\S+\(([^)]+)\)\s*#T\d+"
-    )
-    
+    GAME_RE = re.compile(r"#N(\d+)\.\s*(✅?)\s*\S+\(([^)]+)\)\s*-\s*(✅?)\s*\S+\(([^)]+)\)\s*#T\d+")
     m = GAME_RE.search(text)
     if not m:
         return None
-        
     group2_cards = m.group(5)
     return {
         "number": int(m.group(1)),
-        "group1_cards": m.group(3),
-        "group2_cards": group2_cards,
         "group1_suits": set(c for c in m.group(3) if c in SUIT_OPPOSITE),
         "group2_first_suit": extract_first_card_suit(group2_cards),
     }
 
 
-# ─── Logique principale ───────────────────────────────────────────────────────
+# ─── Logique de prédiction ───────────────────────────────────────────────────
 
 async def _update_prediction_status(bot: Bot, pred: dict, status: str) -> None:
-    """Met à jour le statut d'une prédiction"""
     new_text = build_prediction_text(pred["target_n"], pred["suit"], status)
     try:
         await bot.edit_message_text(
@@ -91,13 +78,12 @@ async def _update_prediction_status(bot: Bot, pred: dict, status: str) -> None:
             message_id=pred["msg_id"],
             text=new_text,
         )
-        logger.info("Prédiction #%d → %s (couleur: %s)", pred["target_n"], status, pred["suit"])
+        logger.info("Prédiction #%d → %s", pred["target_n"], status)
     except TelegramError as e:
-        logger.error("Impossible de modifier le message de prédiction : %s", e)
+        logger.error("Erreur modification message: %s", e)
 
 
-async def process_game(bot: Bot, chat_id: int, text: str) -> None:
-    """Traite un message de jeu"""
+async def process_game_message(bot: Bot, text: str) -> None:
     global last_prediction_failed
 
     game = parse_game(text)
@@ -105,36 +91,23 @@ async def process_game(bot: Bot, chat_id: int, text: str) -> None:
         return
 
     n = game["number"]
-    logger.info("Message jeu détecté : #N%d", n)
+    logger.info("Traitement jeu #N%d", n)
 
-    # ── 1️⃣ VÉRIFICATION DES PRÉDICTIONS EN ATTENTE ─────────────────────────
-    to_delete: list[int] = []
-
+    # 1️⃣ VÉRIFICATION PRÉDICTIONS EN ATTENTE
+    to_delete = []
     for trigger_key, pred in list(pending_predictions.items()):
-        target_n = pred["target_n"]
-        max_n = pred["max_n"]
-        suit = pred["suit"]
-
-        if n < target_n or n > max_n:
+        if n < pred["target_n"] or n > pred["max_n"]:
             continue
 
-        # Vérification: la couleur prédite est-elle dans le 1er groupe ?
-        found = suit in game["group1_suits"]
-
+        found = pred["suit"] in game["group1_suits"]
+        
         if found:
-            offset = n - target_n
-            if offset == 0:
-                status = "✅0️⃣"
-            elif offset == 1:
-                status = "✅1️⃣"
-            else:
-                status = "✅2️⃣"
-            
+            offset = n - pred["target_n"]
+            status = "✅0️⃣" if offset == 0 else "✅1️⃣" if offset == 1 else "✅2️⃣"
             await _update_prediction_status(bot, pred, status)
             to_delete.append(trigger_key)
             last_prediction_failed = False
-            
-        elif n == max_n:
+        elif n == pred["max_n"]:
             await _update_prediction_status(bot, pred, "❌")
             to_delete.append(trigger_key)
             last_prediction_failed = True
@@ -142,153 +115,153 @@ async def process_game(bot: Bot, chat_id: int, text: str) -> None:
     for k in to_delete:
         pending_predictions.pop(k, None)
 
-    # ── 2️⃣ DÉTECTION DE DÉCLENCHEUR ─────────────────────────────────────────
-    # Déclencheur: 2ème groupe reçoit sa 1ère carte + numéro impair
+    # 2️⃣ NOUVEAU DÉCLENCHEUR (2ème groupe, numéro impair)
     if game["group2_first_suit"] and is_odd_number(n) and n not in processed_games:
         source_suit = game["group2_first_suit"]
         predicted_suit = SUIT_OPPOSITE[source_suit]
-        
-        # Offset: +2 normal, +4 après échec
         offset = FAILURE_OFFSET if last_prediction_failed else DEFAULT_OFFSET
         target_n = n + offset
         max_n = target_n + 2
 
-        logger.info(
-            "Déclencheur #N%d: carte %s → prédit %s pour #N%d..%d",
-            n, source_suit, predicted_suit, target_n, max_n
-        )
+        logger.info("Déclencheur #N%d: %s → prédit %s (offset +%d)", n, source_suit, predicted_suit, offset)
 
-        pred_text = build_prediction_text(target_n, predicted_suit, "⏳⏳")
         try:
             sent = await bot.send_message(
-                chat_id=PREDICTION_CHANNEL_ID, 
-                text=pred_text
+                chat_id=PREDICTION_CHANNEL_ID,
+                text=build_prediction_text(target_n, predicted_suit, "⏳⏳")
             )
             
             pending_predictions[n] = {
                 "msg_id": sent.message_id,
                 "chat_id": PREDICTION_CHANNEL_ID,
                 "suit": predicted_suit,
-                "trigger_n": n,
                 "target_n": target_n,
                 "max_n": max_n,
-                "source_suit": source_suit,
             }
             processed_games.add(n)
-            
-            logger.info("Prédiction envoyée: #N%d → %s", target_n, predicted_suit)
-            
         except TelegramError as e:
-            logger.error("Erreur envoi prédiction : %s", e)
+            logger.error("Erreur envoi: %s", e)
 
 
 # ─── Handlers Telegram ───────────────────────────────────────────────────────
 
-async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler pour les messages du canal source"""
-    post = update.channel_post or update.edited_channel_post
-    if not post or not post.text:
-        return
-    
-    if post.chat_id == SOURCE_CHANNEL_ID:
-        await process_game(context.bot, post.chat_id, post.text)
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_ID:
         return
-    await update.message.reply_text("👋 Bot Légiste actif !\n/help pour les commandes")
+    await update.message.reply_text("👋 Bot actif! /help pour l'aide")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_ID:
         return
-        
     await update.message.reply_text(
-        "📖 *Aide — Bot Légiste*\n\n"
-        "*Logique :*\n"
-        "• Déclencheur: 2ème groupe reçoit 1ère carte (numéro impair)\n"
-        "• Prédiction: opposé de la 1ère carte du 2ème groupe\n"
-        "• Offset: +2 normal, +4 après échec\n"
-        "• Vérification: 1er groupe uniquement\n\n"
-        "*Commandes :*\n"
-        "/stats — Statistiques\n"
-        "/reset — Réinitialiser\n"
-        "/offset — Voir l'offset",
-        parse_mode=ParseMode.MARKDOWN,
+        "📖 *Aide*\n"
+        "• Déclencheur: 2ème groupe reçoit 1ère carte (impair)\n"
+        "• Prédiction: opposé de cette carte\n"
+        "• Offset: +2 normal, +4 après ❌\n"
+        "• /stats - Statistiques\n"
+        "• /reset - Réinitialiser",
+        parse_mode=ParseMode.MARKDOWN
     )
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_ID:
         return
-        
     pending = len(pending_predictions)
-    offset_type = "+4 (après échec)" if last_prediction_failed else "+2 (normal)"
-    
-    text = (
-        f"📊 *Statistiques*\n\n"
-        f"🔮 Prédictions en attente: *{pending}*\n"
-        f"📐 Offset: *{offset_type}*\n"
-        f"🎮 Jeux traités: *{len(processed_games)}*"
+    offset = "+4" if last_prediction_failed else "+2"
+    await update.message.reply_text(
+        f"📊 Stats:\n🔮 En attente: {pending}\n📐 Offset: {offset}\n🎮 Traités: {len(processed_games)}",
+        parse_mode=ParseMode.MARKDOWN
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global processed_games, pending_predictions, last_prediction_failed
-    
     if update.effective_user.id != ADMIN_ID:
         return
-        
-    processed_games = set()
-    pending_predictions = {}
+    processed_games.clear()
+    pending_predictions.clear()
     last_prediction_failed = False
-    
-    logger.info("Réinitialisation par %s", update.effective_user)
-    await update.message.reply_text("🔄 Réinitialisation complète effectuée.")
+    await update.message.reply_text("🔄 Réinitialisé!")
 
 
-async def offset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != ADMIN_ID:
+async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    post = update.channel_post or update.edited_channel_post
+    if not post or not post.text:
         return
-        
-    offset_type = "+4 (après échec)" if last_prediction_failed else "+2 (normal)"
-    await update.message.reply_text(f"📐 Offset actuel : *{offset_type}*", parse_mode=ParseMode.MARKDOWN)
+    if post.chat_id == SOURCE_CHANNEL_ID:
+        await process_game_message(context.bot, post.text)
+
+
+# ─── Configuration Application PTB ────────────────────────────────────────────
+
+# Initialisation PTB (sans updater pour webhook)
+ptb = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .updater(None)  # Important: pas d'updater en mode webhook
+    .build()
+)
+
+# Ajout des handlers
+ptb.add_handler(CommandHandler("start", start))
+ptb.add_handler(CommandHandler("help", help_command))
+ptb.add_handler(CommandHandler("stats", stats_command))
+ptb.add_handler(CommandHandler("reset", reset_command))
+ptb.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POSTS, channel_post_handler))
+
+
+# ─── Configuration FastAPI ───────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Gestion du cycle de vie de l'application"""
+    # Démarrage
+    if WEBHOOK_URL:
+        await ptb.bot.set_webhook(url=f"{WEBHOOK_URL}/telegram")
+        logger.info(f"Webhook configuré: {WEBHOOK_URL}/telegram")
+    
+    async with ptb:
+        await ptb.start()
+        logger.info("Bot démarré")
+        yield
+        await ptb.stop()
+        logger.info("Bot arrêté")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.post("/telegram")
+async def process_update(request: Request):
+    """Endpoint pour recevoir les webhooks Telegram"""
+    data = await request.json()
+    update = Update.de_json(data, ptb.bot)
+    await ptb.process_update(update)
+    return Response(status_code=HTTPStatus.OK)
+
+
+@app.get("/")
+async def health():
+    """Health check pour Render"""
+    return {"status": "alive", "predictions_pending": len(pending_predictions)}
+
+
+@app.get("/webhook-info")
+async def webhook_info():
+    """Info sur le webhook configuré"""
+    info = await ptb.bot.get_webhook_info()
+    return {
+        "url": info.url,
+        "has_custom_certificate": info.has_custom_certificate,
+        "pending_update_count": info.pending_update_count,
+    }
 
 
 # ─── Point d'entrée ──────────────────────────────────────────────────────────
 
-def main() -> None:
-    # Validation de la configuration
-    validate_config()
-    
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # Handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("reset", reset_command))
-    app.add_handler(CommandHandler("offset", offset_command))
-
-    app.add_handler(
-        MessageHandler(
-            filters.UpdateType.CHANNEL_POSTS | filters.UpdateType.EDITED_CHANNEL_POST,
-            channel_post_handler,
-        )
-    )
-
-    logger.info("Bot démarré sur port %d", PORT)
-    logger.info("Source: %s | Prédiction: %s", SOURCE_CHANNEL_ID, PREDICTION_CHANNEL_ID)
-    
-    # Configuration Render.com (port 10000)
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=None,  # Render gère le webhook automatiquement
-    )
-
-
 if __name__ == "__main__":
-    main()
+    validate_config()
+    logger.info(f"Démarrage sur le port {PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
