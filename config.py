@@ -1,6 +1,5 @@
 """
 Configuration du Bot Légiste pour Render.com
-Toutes les variables d'environnement sont définies ici
 """
 
 import os
@@ -17,47 +16,19 @@ PREDICTION_CHANNEL_ID = int(os.environ.get("PREDICTION_CHANNEL_ID", "-1003504929
 
 # ─── Configuration Render.com ────────────────────────────────────────────────
 PORT = int(os.environ.get("PORT", "10000"))
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")  # https://votre-app.onrender.com
 
 # ─── Paramètres de prédiction ───────────────────────────────────────────────
-DEFAULT_OFFSET = 2   # Offset normal (+2)
-FAILURE_OFFSET = 4   # Offset après échec (+4)
+DEFAULT_OFFSET = 2
+FAILURE_OFFSET = 4
 
-# ─── Correspondance des couleurs opposées ────────────────────────────────────
-SUIT_OPPOSITE = {
-    "♦": "♣",
-    "♣": "♦",
-    "♥": "♠",
-    "♠": "♥",
-}
+# ─── Correspondance des couleurs ───────────────────────────────────────────────
+SUIT_OPPOSITE = {"♦": "♣", "♣": "♦", "♥": "♠", "♠": "♥"}
+SUIT_EMOJI = {"♦": "♦️", "♣": "♣️", "♥": "❤️", "♠": "♠️"}
 
-SUIT_EMOJI = {
-    "♦": "♦️",
-    "♣": "♣️",
-    "♥": "❤️",
-    "♠": "♠️",
-}
-
-# ─── Validation de la configuration ──────────────────────────────────────────
 def validate_config():
-    """Vérifie que toutes les variables essentielles sont présentes"""
-    required_vars = [
-        ("API_ID", API_ID),
-        ("API_HASH", API_HASH),
-        ("BOT_TOKEN", BOT_TOKEN),
-        ("ADMIN_ID", ADMIN_ID),
-        ("SOURCE_CHANNEL_ID", SOURCE_CHANNEL_ID),
-        ("PREDICTION_CHANNEL_ID", PREDICTION_CHANNEL_ID),
-    ]
-    
-    missing = []
-    for name, value in required_vars:
-        if not value or value == 0:
-            missing.append(name)
-    
-    if missing:
-        raise RuntimeError(f"Variables d'environnement manquantes: {', '.join(missing)}")
-    
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN manquant!")
+    if not WEBHOOK_URL:
+        print("⚠️ WEBHOOK_URL non défini - le bot ne recevra pas les mises à jour!")
     return True
-
-# Validation au chargement
-validate_config()
