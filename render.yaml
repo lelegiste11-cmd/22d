@@ -1,27 +1,23 @@
 services:
   - type: web
-    name: telegram-prediction-bot
-    env: python
-    region: oregon
-    plan: free
+    name: bot-legiste
+    runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     envVars:
-      - key: PORT
-        value: "10000"
       - key: API_ID
-        value: "29177661"
+        value: 29177661
       - key: API_HASH
-        value: "a8639172fa8d35dbfd8ea46286d349ab"
+        value: a8639172fa8d35dbfd8ea46286d349ab
       - key: BOT_TOKEN
-        value: "8458163781:AAFj5fth5J-nRjHHd0-hlxkX3r0_ClNtlwQ"
+        value: 8703080099:AAFUf_rSBF0XxQE-HI78W48d3JGqCgM0DMA
       - key: ADMIN_ID
-        value: "6180384006"
+        value: 6180384006
       - key: SOURCE_CHANNEL_ID
-        value: "-1002682552255"
+        value: -1002682552255
       - key: PREDICTION_CHANNEL_ID
-        value: "-1003664468884"
-      - key: PREDICTION_OFFSET
-        value: "2"
-      - key: TELEGRAM_SESSION
-        sync: false
+        value: -1003504929751
+      - key: PORT
+        value: 10000
+      - key: WEBHOOK_URL
+        sync: false  # Remplir après déploiement: https://votre-app.onrender.com
