@@ -1,69 +1,63 @@
 """
-Configuration du bot Telegram de prédiction Baccarat
+Configuration du Bot Légiste pour Render.com
+Toutes les variables d'environnement sont définies ici
 """
 
-# ==========================================
-# IDENTIFIANTS TELEGRAM (HARDCODÉS)
-# ==========================================
+import os
 
-# API Telegram (obtenu sur https://my.telegram.org)
-API_ID = 29177661
-API_HASH = "a8639172fa8d35dbfd8ea46286d349ab"
+# ─── Configuration API Telegram ─────────────────────────────────────────────
+API_ID = int(os.environ.get("API_ID", "29177661"))
+API_HASH = os.environ.get("API_HASH", "a8639172fa8d35dbfd8ea46286d349ab")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8703080099:AAFUf_rSBF0XxQE-HI78W48d3JGqCgM0DMA")
 
-# Bot Token (@BotFather)
-BOT_TOKEN = "8703080099:AAFUf_rSBF0XxQE-HI78W48d3JGqCgM0DMA"
+# ─── Configuration des IDs ───────────────────────────────────────────────────
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "6180384006"))
+SOURCE_CHANNEL_ID = int(os.environ.get("SOURCE_CHANNEL_ID", "-1002682552255"))
+PREDICTION_CHANNEL_ID = int(os.environ.get("PREDICTION_CHANNEL_ID", "-1003504929751"))
 
-# ID de l'administrateur (pour commandes privées)
-ADMIN_ID = 6180384006
+# ─── Configuration Render.com ────────────────────────────────────────────────
+PORT = int(os.environ.get("PORT", "10000"))
 
-# ID des canaux Telegram
-SOURCE_CHANNEL_ID = -1002682552255      # Canal source Baccarat
-PREDICTION_CHANNEL_ID = -1003504929751  # Canal de prédiction
+# ─── Paramètres de prédiction ───────────────────────────────────────────────
+DEFAULT_OFFSET = 2   # Offset normal (+2)
+FAILURE_OFFSET = 4   # Offset après échec (+4)
 
-# Port pour le serveur web (Render.com utilise 10000 par défaut)
-PORT = 10000
-
-# ==========================================
-# MAPPING DES COULEURS
-# ==========================================
-
-# Mapping pour l'opposé des couleurs
-# ♣️ <-> ♠️ (Trèfle <-> Pique)
-# ❤️ <-> ♦️ (Cœur <-> Carreau)
-SUIT_MAPPING = {
-    '♠️': '♣️',
-    '♠': '♣️',
-    '❤️': '♦️',
-    '❤': '♦️',
-    '♥️': '♦️',
-    '♥': '♦️',
-    '♣️': '♠️',
-    '♣': '♠️',
-    '♦️': '❤️',
-    '♦': '❤️'
+# ─── Correspondance des couleurs opposées ────────────────────────────────────
+SUIT_OPPOSITE = {
+    "♦": "♣",
+    "♣": "♦",
+    "♥": "♠",
+    "♠": "♥",
 }
 
-# Toutes les couleurs possibles
-ALL_SUITS = ['♠', '♥', '♦', '♣']
-
-# Affichage standardisé des couleurs
-SUIT_DISPLAY = {
-    '♠': '♠️',
-    '♥': '❤️',
-    '♦': '♦️',
-    '♣': '♣️'
+SUIT_EMOJI = {
+    "♦": "♦️",
+    "♣": "♣️",
+    "♥": "❤️",
+    "♠": "♠️",
 }
 
-# Noms des couleurs pour l'affichage
-SUIT_NAMES = {
-    '♠️': 'Pique',
-    '♠': 'Pique',
-    '❤️': 'Cœur',
-    '❤': 'Cœur',
-    '♥️': 'Cœur',
-    '♥': 'Cœur',
-    '♦️': 'Carreau',
-    '♦': 'Carreau',
-    '♣️': 'Trèfle',
-    '♣': 'Trèfle'
-}
+# ─── Validation de la configuration ──────────────────────────────────────────
+def validate_config():
+    """Vérifie que toutes les variables essentielles sont présentes"""
+    required_vars = [
+        ("API_ID", API_ID),
+        ("API_HASH", API_HASH),
+        ("BOT_TOKEN", BOT_TOKEN),
+        ("ADMIN_ID", ADMIN_ID),
+        ("SOURCE_CHANNEL_ID", SOURCE_CHANNEL_ID),
+        ("PREDICTION_CHANNEL_ID", PREDICTION_CHANNEL_ID),
+    ]
+    
+    missing = []
+    for name, value in required_vars:
+        if not value or value == 0:
+            missing.append(name)
+    
+    if missing:
+        raise RuntimeError(f"Variables d'environnement manquantes: {', '.join(missing)}")
+    
+    return True
+
+# Validation au chargement
+validate_config()
