@@ -36,18 +36,17 @@ logger = logging.getLogger(__name__)
 # ─── État global ──────────────────────────────────────────────────────────────
 processed_games: set[int] = set()
 pending_predictions: dict[int, dict] = {}
-last_prediction_failed: bool = False
+last_prediction_number: int = 0  # Dernier numéro de JEU sur lequel on a prédit
+PREDICTION_STEP: int = 3  # Saut fixe entre prédictions (toujours +3)
+PREDICTION_OFFSET: int = 32  # Offset fixe N+32
 
 
 # ─── Utilitaires ─────────────────────────────────────────────────────────────
 
 def extract_first_card_suit(group_text: str) -> str | None:
+    """Extrait la première enseigne (suit) trouvée dans le texte du groupe"""
     suits = [c for c in group_text if c in SUIT_OPPOSITE]
     return suits[0] if suits else None
-
-
-def is_odd_number(n: int) -> bool:
-    return (n % 10) in [1, 3, 5, 7, 9]
 
 
 def build_prediction_text(target_n: int, suit: str, status: str) -> str:
@@ -56,15 +55,21 @@ def build_prediction_text(target_n: int, suit: str, status: str) -> str:
 
 
 def parse_game(text: str) -> dict | None:
+    """
+    Parse le message du jeu.
+    Format attendu: #N384. 6(6♦️14♠️) - ✅9(9♥️J♥️) #T15 🔴#R
+    """
     GAME_RE = re.compile(r"#N(\d+)\.\s*(✅?)\s*\S+\(([^)]+)\)\s*-\s*(✅?)\s*\S+\(([^)]+)\)\s*#T\d+")
     m = GAME_RE.search(text)
     if not m:
         return None
-    group2_cards = m.group(5)
+    
+    group1_cards = m.group(3)  # 1er groupe entre parenthèses
+    
     return {
         "number": int(m.group(1)),
-        "group1_suits": set(c for c in m.group(3) if c in SUIT_OPPOSITE),
-        "group2_first_suit": extract_first_card_suit(group2_cards),
+        "group1_first_suit": extract_first_card_suit(group1_cards),  # 1ère carte du 1er groupe
+        "group1_suits": set(c for c in group1_cards if c in SUIT_OPPOSITE),
     }
 
 
@@ -84,7 +89,7 @@ async def _update_prediction_status(bot: Bot, pred: dict, status: str) -> None:
 
 
 async def process_game_message(bot: Bot, text: str) -> None:
-    global last_prediction_failed
+    global last_prediction_number
 
     game = parse_game(text)
     if not game:
@@ -93,7 +98,7 @@ async def process_game_message(bot: Bot, text: str) -> None:
     n = game["number"]
     logger.info("Traitement jeu #N%d", n)
 
-    # 1️⃣ VÉRIFICATION PRÉDICTIONS EN ATTENTE
+    # 1️⃣ VÉRIFICATION PRÉDICTIONS EN ATTENTE (mise à jour des statuts)
     to_delete = []
     for trigger_key, pred in list(pending_predictions.items()):
         if n < pred["target_n"] or n > pred["max_n"]:
@@ -106,41 +111,57 @@ async def process_game_message(bot: Bot, text: str) -> None:
             status = "✅0️⃣" if offset == 0 else "✅1️⃣" if offset == 1 else "✅2️⃣"
             await _update_prediction_status(bot, pred, status)
             to_delete.append(trigger_key)
-            last_prediction_failed = False
         elif n == pred["max_n"]:
             await _update_prediction_status(bot, pred, "❌")
             to_delete.append(trigger_key)
-            last_prediction_failed = True
 
     for k in to_delete:
         pending_predictions.pop(k, None)
 
-    # 2️⃣ NOUVEAU DÉCLENCHEUR (2ème groupe, numéro impair)
-    if game["group2_first_suit"] and is_odd_number(n) and n not in processed_games:
-        source_suit = game["group2_first_suit"]
-        predicted_suit = SUIT_OPPOSITE[source_suit]
-        offset = FAILURE_OFFSET if last_prediction_failed else DEFAULT_OFFSET
-        target_n = n + offset
-        max_n = target_n + 2
+    # 2️⃣ NOUVEAU DÉCLENCHEUR
+    # On prédit immédiatement dès que le jeu est éligible (saut de +3 depuis la dernière prédiction)
+    
+    if game["group1_first_suit"] is None:
+        return
+    
+    # Vérifier si ce jeu est éligible pour une prédiction
+    if last_prediction_number == 0:
+        # Première prédiction : on accepte le premier jeu valide
+        is_eligible = n not in processed_games
+    else:
+        # Vérifier le saut de +3 depuis la dernière prédiction
+        expected_n = last_prediction_number + PREDICTION_STEP
+        is_eligible = (n == expected_n) and (n not in processed_games)
+    
+    if not is_eligible:
+        return
 
-        logger.info("Déclencheur #N%d: %s → prédit %s (offset +%d)", n, source_suit, predicted_suit, offset)
+    # Calcul de la prédiction
+    source_suit = game["group1_first_suit"]
+    target_n = n + PREDICTION_OFFSET
+    max_n = target_n + 2  # Vérification sur target, target+1, target+2
 
-        try:
-            sent = await bot.send_message(
-                chat_id=PREDICTION_CHANNEL_ID,
-                text=build_prediction_text(target_n, predicted_suit, "⏳⏳")
-            )
-            
-            pending_predictions[n] = {
-                "msg_id": sent.message_id,
-                "chat_id": PREDICTION_CHANNEL_ID,
-                "suit": predicted_suit,
-                "target_n": target_n,
-                "max_n": max_n,
-            }
-            processed_games.add(n)
-        except TelegramError as e:
-            logger.error("Erreur envoi: %s", e)
+    logger.info("Déclencheur #N%d: 1ère carte 1er groupe = %s → prédit %s pour #%d", 
+                n, source_suit, source_suit, target_n)
+
+    try:
+        sent = await bot.send_message(
+            chat_id=PREDICTION_CHANNEL_ID,
+            text=build_prediction_text(target_n, source_suit, "⏳⏳")
+        )
+        
+        pending_predictions[n] = {
+            "msg_id": sent.message_id,
+            "chat_id": PREDICTION_CHANNEL_ID,
+            "suit": source_suit,
+            "target_n": target_n,
+            "max_n": max_n,
+        }
+        processed_games.add(n)
+        last_prediction_number = n
+        
+    except TelegramError as e:
+        logger.error("Erreur envoi: %s", e)
 
 
 # ─── Handlers Telegram ───────────────────────────────────────────────────────
@@ -156,9 +177,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     await update.message.reply_text(
         "📖 *Aide*\n"
-        "• Déclencheur: 2ème groupe reçoit 1ère carte (impair)\n"
-        "• Prédiction: opposé de cette carte\n"
-        "• Offset: +2 normal, +4 après ❌\n"
+        "• Déclencheur: 1ère carte du 1er groupe\n"
+        "• Prédiction: même couleur pour le jeu N+32\n"
+        "• Saut fixe: +3 entre prédictions\n"
+        "• Prédiction immédiate, pas d'attente de vérification\n"
         "• /stats - Statistiques\n"
         "• /reset - Réinitialiser",
         parse_mode=ParseMode.MARKDOWN
@@ -169,20 +191,19 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.effective_user.id != ADMIN_ID:
         return
     pending = len(pending_predictions)
-    offset = "+4" if last_prediction_failed else "+2"
     await update.message.reply_text(
-        f"📊 Stats:\n🔮 En attente: {pending}\n📐 Offset: {offset}\n🎮 Traités: {len(processed_games)}",
+        f"📊 Stats:\n🔮 En attente: {pending}\n📐 Saut: +{PREDICTION_STEP}\n🎮 Dernière prédiction sur jeu: #{last_prediction_number}\n🎮 Traités: {len(processed_games)}",
         parse_mode=ParseMode.MARKDOWN
     )
 
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global processed_games, pending_predictions, last_prediction_failed
+    global processed_games, pending_predictions, last_prediction_number
     if update.effective_user.id != ADMIN_ID:
         return
     processed_games.clear()
     pending_predictions.clear()
-    last_prediction_failed = False
+    last_prediction_number = 0
     await update.message.reply_text("🔄 Réinitialisé!")
 
 
