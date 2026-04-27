@@ -11,7 +11,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8703080099:AAFUf_rSBF0XxQE-HI78W48d3JGq
 
 # ─── Configuration des IDs ───────────────────────────────────────────────────
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "6180384006"))
-SOURCE_CHANNEL_ID = int(os.environ.get("SOURCE_CHANNEL_ID", "-1002682552255"))
+SOURCE_CHANNEL_ID = int(os.environ.get("SOURCE_CHANNEL_ID", "-1003741257466")
 PREDICTION_CHANNEL_ID = int(os.environ.get("PREDICTION_CHANNEL_ID", "-1003504929751"))
 
 # ─── Configuration Render.com ────────────────────────────────────────────────
