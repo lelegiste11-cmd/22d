@@ -1,34 +1,70 @@
+# config.py
 """
-Configuration du Bot Légiste pour Render.com
+Configuration BACCARAT AI 🤖
+Définissez toutes les variables d environnement ci-dessous sur votre plateforme
+avant de lancer le bot.
+
+Variables obligatoires :
+  - ADMIN_ID
+  - PREDICTION_CHANNEL_ID
+  - API_ID
+  - API_HASH
+  - BOT_TOKEN
+
+Variables optionnelles :
+  - TELEGRAM_SESSION   (laisser vide pour session automatique)
+  - PORT               (defaut : 10000)
+  - API_POLL_INTERVAL  (defaut : 5)
 """
 
 import os
 
-# ─── Configuration API Telegram ─────────────────────────────────────────────
-API_ID = int(os.environ.get("API_ID", "29177661"))
-API_HASH = os.environ.get("API_HASH", "a8639172fa8d35dbfd8ea46286d349ab")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8703080099:AAFUf_rSBF0XxQE-HI78W48d3JGqCgM0DMA")
+def parse_channel_id(value: str) -> int:
+    try:
+        channel_id = int(value)
+        if channel_id > 0 and len(str(channel_id)) >= 10:
+            channel_id = -channel_id
+        return channel_id
+    except:
+        raise ValueError(f"ID de canal invalide : {value}")
 
-# ─── Configuration des IDs ───────────────────────────────────────────────────
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "6180384006"))
-SOURCE_CHANNEL_ID = int(os.environ.get("SOURCE_CHANNEL_ID", "-1003741257466"))  # ✅ Modifié
-PREDICTION_CHANNEL_ID = int(os.environ.get("PREDICTION_CHANNEL_ID", "-1003504929751"))
+# ============================================================================
+# VARIABLES D ENVIRONNEMENT - OBLIGATOIRES
+# ============================================================================
 
-# ─── Configuration Render.com ────────────────────────────────────────────────
-PORT = int(os.environ.get("PORT", "10000"))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")  # https://votre-app.onrender.com
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+PREDICTION_CHANNEL_ID = parse_channel_id(os.getenv("PREDICTION_CHANNEL_ID", "0"))
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION", "")
 
-# ─── Paramètres de prédiction ───────────────────────────────────────────────
-DEFAULT_OFFSET = 2
-FAILURE_OFFSET = 4
+# ============================================================================
+# PARAMETRES DU BOT
+# ============================================================================
 
-# ─── Correspondance des couleurs ───────────────────────────────────────────────
-SUIT_OPPOSITE = {"♦": "♣", "♣": "♦", "♥": "♠", "♠": "♥"}
-SUIT_EMOJI = {"♦": "♦️", "♣": "♣️", "♥": "❤️", "♠": "♠️"}
+# Port du serveur health check — prend le port de la plateforme, sinon 10000
+PORT = int(os.getenv("PORT", "10000"))
+API_POLL_INTERVAL = int(os.getenv("API_POLL_INTERVAL", "5"))
 
-def validate_config():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN manquant!")
-    if not WEBHOOK_URL:
-        print("⚠️ WEBHOOK_URL non défini - le bot ne recevra pas les mises à jour!")
-    return True
+# Décalage de prédiction (par défaut a=1)
+PREDICTION_OFFSET = int(os.getenv("PREDICTION_OFFSET", "1"))
+
+# ============================================================================
+# CONSTANTES — NE PAS MODIFIER
+# ============================================================================
+
+# Valeurs des cartes pour le calcul du total
+CARD_VALUES = {
+    "A": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 0,
+    "J": 0, "Q": 0, "K": 0,
+    # Valeurs numériques directes
+    "1": 1, "0": 0,
+}
+
+SUIT_DISPLAY = {
+    "♠": "♠️",
+    "♥": "❤️",
+    "♦": "♦️",
+    "♣": "♣️"
+}
